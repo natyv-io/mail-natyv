@@ -5,7 +5,13 @@ import "github.com/natyv-io/sdks/go/widgets"
 expose App
 
 func App(parent widgets.Container) error {
-    <Container>
-        <Label>Hello from natyv!</Label>
+    <Container styles={root}>
+        <Container styles={toolbar}>
+            <Button styles={toolbarBtn} onClick={handleShowInbox}>Inbox</Button>
+            <Button styles={toolbarBtn} onClick={handleShowSent}>Sent</Button>
+            <Button styles={toolbarBtn} onClick={handleShowCompose}>Compose</Button>
+        </Container>
+        <Container ref={&contentArea} styles={content}>
+        </Container>
     </Container>
 }

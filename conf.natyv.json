@@ -1,11 +1,17 @@
 {
   "name": "mail-natyv",
-  "wasm_compile": "tinygo build -target wasip1 -buildmode=c-shared -o mail-natyv.wasm .",
+  "wasm_compile": "../scripts/gen-secrets-go.sh && tinygo build -target wasip1 -buildmode=c-shared -o mail-natyv.wasm .",
   "sqlite": {
     "enabled": false
   },
   "network": {
-    "enabled": false
+    "enabled": true,
+    "tcp": {
+      "allowed_sockets": [
+        { "host": "imap.gmail.com", "port": 993, "tls": "implicit" },
+        { "host": "smtp.gmail.com", "port": 465, "tls": "implicit" }
+      ]
+    }
   },
   "ui": {
     "backend": "clay"

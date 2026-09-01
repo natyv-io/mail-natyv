@@ -1,0 +1,34 @@
+root {
+  direction: topToBottom
+  width: grow
+  height: grow
+}
+
+toolbar {
+  direction: leftToRight
+  childGap: 8
+  width: grow
+  height: 48
+  alignY: center
+}
+
+toolbarBtn {
+  width: grow
+}
+
+content {
+  direction: topToBottom
+  width: grow
+  height: grow
+  childGap: 8
+}
+
+row {
+  direction: topToBottom
+  width: grow
+  childGap: 2
+}
+
+field {
+  width: grow
+}

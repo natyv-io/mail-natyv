@@ -9,7 +9,7 @@ import (
 //go:wasmexport natyv_init
 func natyvInit() int32 {
     root, err := widgets.CreateContainer(widgets.Layout{
-        Sizing: widgets.Sizing{Width: widgets.Fixed(400), Height: widgets.Fixed(400)},
+        Sizing: widgets.Sizing{Width: widgets.Grow(), Height: widgets.Grow()},
     }, false, 0)
     if err != nil {
         pdk.SetErrorString(err.Error())
@@ -17,6 +17,14 @@ func natyvInit() int32 {
     }
     if err := App(root); err != nil {
         pdk.SetErrorString(err.Error())
+        return 1
+    }
+    if err := connectIMAP(); err != nil {
+        pdk.SetErrorString("connect: " + err.Error())
+        return 1
+    }
+    if err := handleShowInbox(); err != nil {
+        pdk.SetErrorString("show inbox: " + err.Error())
         return 1
     }
     return 0

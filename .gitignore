@@ -1,5 +1,9 @@
 .secrets.env
 
+# Generated from .secrets.env by scripts/gen-secrets-go.sh, the first step
+# of wasm_compile -- real credentials, never committed.
+guest/secrets_generated.go
+
 # natyv prepare's own regenerated output -- reproducible from app.go.ntx,
 # never hand-edited (carries a "DO NOT EDIT" header).
 guest/*.natyv.go
