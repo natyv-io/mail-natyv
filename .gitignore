@@ -1,0 +1,11 @@
+.secrets.env
+
+# natyv prepare's own regenerated output -- reproducible from app.go.ntx,
+# never hand-edited (carries a "DO NOT EDIT" header).
+guest/*.natyv.go
+guest/styletokens_generated.go
+guest/.natyv-build-cache
+
+# natyv build's own compiled/bundled output.
+guest/*.wasm
+dist/

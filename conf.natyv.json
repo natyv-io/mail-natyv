@@ -1,0 +1,13 @@
+{
+  "name": "mail-natyv",
+  "wasm_compile": "tinygo build -target wasip1 -buildmode=c-shared -o mail-natyv.wasm .",
+  "sqlite": {
+    "enabled": false
+  },
+  "network": {
+    "enabled": false
+  },
+  "ui": {
+    "backend": "clay"
+  }
+}

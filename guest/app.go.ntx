@@ -1,0 +1,11 @@
+package main
+
+import "github.com/natyv-io/sdks/go/widgets"
+
+expose App
+
+func App(parent widgets.Container) error {
+    <Container>
+        <Label>Hello from natyv!</Label>
+    </Container>
+}
