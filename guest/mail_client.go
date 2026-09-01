@@ -52,6 +52,13 @@ func readMessageBody(seq int) (string, error) {
 	return imapClient.FetchBody(seq)
 }
 
+// deleteMessage removes seq from whichever mailbox is currently selected.
+// Real caveat, inherited from imap.Client.Delete: against Gmail this
+// archives rather than permanently deletes.
+func deleteMessage(seq int) error {
+	return imapClient.Delete(seq)
+}
+
 func sendMessage(to, subject, body string) error {
 	cl, err := smtp.Dial(smtpHost, smtpPort, "mail-natyv")
 	if err != nil {

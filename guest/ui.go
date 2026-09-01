@@ -19,6 +19,29 @@ var viewRoot widgets.Container
 
 var currentFolder = inboxFolder
 
+// folderCache holds the last-fetched message list per folder, keyed by
+// mailbox name -- returning to a folder (the toolbar buttons, or the read
+// view's "< Back") redisplays this instead of hitting IMAP again, since
+// nothing server-side changes just by looking at a message. Invalidated
+// explicitly wherever we know we've changed a folder's own contents (see
+// sendMessage's own caller in showCompose, which drops sentFolder's
+// cache entry after a real send so the next visit re-fetches for real).
+var folderCache = map[string][]imap.Message{}
+
+// cachedListFolder returns folderCache's entry for mailbox if present,
+// otherwise fetches it for real via listFolder and caches the result.
+func cachedListFolder(mailbox string, maxCount int) ([]imap.Message, error) {
+	if msgs, ok := folderCache[mailbox]; ok {
+		return msgs, nil
+	}
+	msgs, err := listFolder(mailbox, maxCount)
+	if err != nil {
+		return nil, err
+	}
+	folderCache[mailbox] = msgs
+	return msgs, nil
+}
+
 // growFixed is Width: Grow, Height: Fixed(height) -- the right shape for
 // any leaf widget (Label/Button/TextField): Fit-sizing a leaf collapses it
 // toward zero height, since natyv has no real font-driven text
@@ -26,6 +49,14 @@ var currentFolder = inboxFolder
 func growFixed(parent uint32, height float32) widgets.Layout {
 	l := widgets.ParentID(parent)
 	l.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Fixed(height)}
+	return l
+}
+
+// smallFixed is a small, non-Grow fixed-size shape -- for a decorative
+// widget like Spinner that shouldn't stretch to fill the row.
+func smallFixed(parent uint32, width, height float32) widgets.Layout {
+	l := widgets.ParentID(parent)
+	l.Sizing = widgets.Sizing{Width: widgets.Fixed(width), Height: widgets.Fixed(height)}
 	return l
 }
 
@@ -81,23 +112,58 @@ func showFolder(folder string) error {
 	if err != nil {
 		return err
 	}
+	rootID := uint32(root)
 
-	msgs, err := listFolder(folder, 20)
+	// Manual refresh -- Inbox's own cache is never auto-invalidated by a
+	// send (unlike Sent, which we know for certain gets a new entry), so
+	// this is the way to actually see new mail without restarting the app.
+	refreshBtn, err := widgets.CreateButton(growFixed(rootID, 28), "Refresh")
+	if err != nil {
+		return err
+	}
+	refreshBtn.OnClick(func() error {
+		delete(folderCache, folder)
+		return showFolder(folder)
+	})
+
+	msgs, err := cachedListFolder(folder, 20)
 	if err != nil {
 		return showError(err)
 	}
 	if len(msgs) == 0 {
-		_, err := widgets.CreateLabel(growFixed(uint32(root), 24), "No messages.")
+		_, err := widgets.CreateLabel(growFixed(rootID, 24), "No messages.")
 		return err
 	}
 
 	// Newest first.
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if err := createMessageRow(uint32(root), msgs[i]); err != nil {
+		if err := createMessageRow(rootID, msgs[i]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// removeAndShift drops the message whose sequence number is deletedSeq and
+// corrects every remaining message's own Seq to match what the server's
+// real post-EXPUNGE state would be -- EXPUNGE shifts every message with a
+// higher sequence number down by one, so leaving them untouched would make
+// a later action against one of them (Open, Delete) act on the wrong
+// message. Filters in place (reuses msgs' own backing array) since this
+// is always called with the caller's own already-owned cache slice, never
+// a shared one.
+func removeAndShift(msgs []imap.Message, deletedSeq int) []imap.Message {
+	updated := msgs[:0]
+	for _, msg := range msgs {
+		switch {
+		case msg.Seq == deletedSeq:
+			continue
+		case msg.Seq > deletedSeq:
+			msg.Seq--
+		}
+		updated = append(updated, msg)
+	}
+	return updated
 }
 
 func createMessageRow(parent uint32, m imap.Message) error {
@@ -122,12 +188,41 @@ func createMessageRow(parent uint32, m imap.Message) error {
 		return err
 	}
 
+	btnRowLayout := widgets.ParentID(rowID)
+	btnRowLayout.Direction = widgets.LeftToRight
+	btnRowLayout.ChildGap = 4
+	btnRowLayout.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Fit()}
+	btnRow, err := widgets.CreateContainer(btnRowLayout, false, 0)
+	if err != nil {
+		return err
+	}
+	btnRowID := uint32(btnRow)
+
 	seq := m.Seq
-	openBtn, err := widgets.CreateButton(growFixed(rowID, 28), "Open")
+	openBtn, err := widgets.CreateButton(growFixed(btnRowID, 28), "Open")
 	if err != nil {
 		return err
 	}
 	openBtn.OnClick(func() error { return showMessage(seq) })
+
+	deleteBtn, err := widgets.CreateButton(growFixed(btnRowID, 28), "Delete")
+	if err != nil {
+		return err
+	}
+	folder := currentFolder
+	deleteBtn.OnClick(func() error {
+		if err := deleteMessage(seq); err != nil {
+			return showError(err)
+		}
+		// Surgical update, no re-fetch -- see removeAndShift's own doc
+		// comment for why the other cached entries need correcting too,
+		// not just the deleted one dropped.
+		if cached, ok := folderCache[folder]; ok {
+			folderCache[folder] = removeAndShift(cached, seq)
+		}
+		row.Destroy()
+		return nil
+	})
 
 	return nil
 }
@@ -194,9 +289,48 @@ func showCompose() error {
 		to, _ := toField.Text()
 		subject, _ := subjField.Text()
 		body, _ := bodyField.Text()
-		if err := sendMessage(to, subject, body); err != nil {
-			return statusLbl.SetText("Error: " + err.Error())
+
+		if err := statusLbl.SetText(""); err != nil {
+			return err
 		}
+		// Real, deliberate visual feedback during the blocking send call:
+		// this natyv_dispatch handler runs on the worker thread and blocks
+		// for the real network round trip, but widget creation itself
+		// mutates the shared registry immediately (before that blocking
+		// call runs) -- SDL's own render loop, on the separate main
+		// thread, keeps drawing independently the whole time, so the
+		// spinner genuinely animates live during the send, not just at
+		// the very end.
+		spinner, serr := widgets.CreateSpinner(smallFixed(rootID, 60, 16))
+		if serr != nil {
+			return serr
+		}
+		sendErr := sendMessage(to, subject, body)
+		spinner.Destroy()
+
+		if sendErr != nil {
+			return statusLbl.SetText("Error: " + sendErr.Error())
+		}
+
+		// A real send always changes Sent's own contents -- drop its cache
+		// entry so the next visit re-fetches for real. Inbox is left
+		// alone even though a self-send would technically affect it too:
+		// invalidating it on every send would mean paying a real refetch
+		// for the common case (sending to someone else) just to handle a
+		// rare one -- the Refresh button in the folder view is the real,
+		// explicit way to see new mail there.
+		delete(folderCache, sentFolder)
+
+		if err := toField.Clear(); err != nil {
+			return err
+		}
+		if err := subjField.Clear(); err != nil {
+			return err
+		}
+		if err := bodyField.Clear(); err != nil {
+			return err
+		}
+
 		return statusLbl.SetText("Sent!")
 	})
 
