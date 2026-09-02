@@ -14,18 +14,11 @@ func ErrorView(parent widgets.Container, message string) error {
     </Container>
 }
 
-func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error) error {
+func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, page int, pageLabel string, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error) error {
     <Container ref={&viewRoot} styles={content}>
+        <Label text={folderLabel} styles={field} />
         <Container styles={btnRow}>
             <Button styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
-            <%
-                if page > 0 {
-                    <Button styles={secondaryBtn} onClick={onNewer}>Newer</Button>
-                }
-                if canGoOlder {
-                    <Button styles={secondaryBtn} onClick={onOlder}>Older</Button>
-                }
-            %>
             <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
             <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected}>Delete Selected</Button>
         </Container>
@@ -47,6 +40,15 @@ func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder 
                 }
             }
         %>
+        <Container styles={pagerRow}>
+            <Button ref={&olderBtn} styles={secondaryBtn, pagerBtn} onClick={onOlder} text={"<"} />
+            <Label text={pageLabel} styles={pagerLabel} />
+            <Button ref={&newerBtn} styles={secondaryBtn, pagerBtn} onClick={onNewer} text={">"} />
+            <%
+                _ = olderBtn.SetEnabled(canGoOlder)
+                _ = newerBtn.SetEnabled(page > 0)
+            %>
+        </Container>
     </Container>
 }
 

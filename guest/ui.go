@@ -63,6 +63,30 @@ func onPageSize(index int) error {
 	return setPageSize(pageSizeValues[index])
 }
 
+// folderDisplayName is FolderView's own friendly folder-name Label text --
+// currentFolder's real value is a raw IMAP mailbox name ("[Gmail]/Sent
+// Mail" for Sent), not something to show a user directly.
+func folderDisplayName(folder string) string {
+	switch folder {
+	case inboxFolder:
+		return "Inbox"
+	case sentFolder:
+		return "Sent"
+	default:
+		return folder
+	}
+}
+
+// olderBtn/newerBtn are the currently-visible page's own "< "/"> " pager
+// buttons -- single package-level slots, same reasoning as
+// deleteSelectedBtn: only one folder page is ever actually visible (and
+// thus receiving clicks) at a time. Enabled/disabled per page via
+// Button.SetEnabled right after each is created (see FolderView's own
+// markup) rather than hidden -- always visible so N (the current page)
+// stays put instead of the whole pager shifting around.
+var olderBtn *widgets.Button
+var newerBtn *widgets.Button
+
 // setPageSize changes how many messages a folder page holds and applies
 // it immediately. Every folder's own already-cached pages and persisted
 // view were built against the *old* page size, so "page 1" under the new
@@ -422,7 +446,7 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 	if err != nil {
 		return showError(err)
 	}
-	if err := FolderView(*contentArea, toInboxRows(data.msgs), page, data.canGoOlder, pageSizeLabel(),
+	if err := FolderView(*contentArea, toInboxRows(data.msgs), folderDisplayName(folder), page, fmt.Sprintf("Page %d", page+1), data.canGoOlder, pageSizeLabel(),
 		func() error { return renderFolder(folder, page-1, false) },
 		func() error { return renderFolder(folder, page+1, false) },
 		func() error {

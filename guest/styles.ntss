@@ -93,6 +93,30 @@ btnRow {
   childGap: 4
 }
 
+// The bottom "< N >" pager row -- centered, unlike btnRow's own
+// left-aligned toolbar rows.
+pagerRow {
+  direction: leftToRight
+  width: grow
+  height: fit
+  childGap: 8
+  alignX: center
+  alignY: center
+}
+
+// Fixed, not fit -- Button auto-width (2026-09-02) is Button-only today,
+// not yet extended to Label.
+pagerLabel {
+  width: 90
+}
+
+// Combined with secondaryBtn (styles={secondaryBtn, pagerBtn}) on the "<"/
+// ">" pager buttons -- real width: fit sizes each tightly around its own
+// single glyph instead of Button's own much wider 120px default.
+pagerBtn {
+  width: fit
+}
+
 bodyArea {
   width: grow
   height: grow
