@@ -38,9 +38,16 @@ content {
 // every side, which was stacking with `row`'s own padding below to
 // visibly space rows much further apart than intended. Zeroing it out
 // here (real NTSS padding override, 2026-09-02) removes that with no
-// visual role of its own to lose.
+// visual role of its own to lose. width: grow is real too, not
+// decorative -- a bare Container has no width default of its own at
+// all, so without this it sized to its own natural content width
+// instead of the row's real available width, leaving row's own
+// width: grow (its child, one level in) nothing real to grow into --
+// the row card's visible background ended up narrower than the text
+// actually laid out inside it.
 rowWrap {
   padding: 0
+  width: grow
 }
 
 row {
