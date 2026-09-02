@@ -25,11 +25,17 @@ toolbarBtn {
   cornerRadius: {8, 8, 8, 8}
 }
 
+// padding/childGap trimmed down from 8 (2026-09-02) -- at the default page
+// size of 5, the old spacing pushed the "< N >" pager below the window's
+// visible area. Every child here (folder label, btnRow, each message row,
+// pagerRow) paid the childGap cost, so this is the single biggest lever for
+// fitting a full page on screen.
 content {
   direction: topToBottom
   width: grow
   height: grow
-  childGap: 8
+  childGap: 4
+  padding: 4
 }
 
 // The purely-structural per-row wrapper MessageRow needs for its own
@@ -50,12 +56,14 @@ rowWrap {
   width: grow
 }
 
+// padding trimmed from 10 -> 5 (2026-09-02), same "fit a full page on
+// screen" reason as content's own trim above.
 row {
   direction: topToBottom
   width: grow
   height: fit
   childGap: 2
-  padding: 10
+  padding: 5
   backgroundColor: "#1E212AFF"
   cornerRadius: {10, 10, 10, 10}
 }

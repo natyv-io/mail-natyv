@@ -19,8 +19,8 @@ func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, p
         <Label text={folderLabel} styles={field} />
         <Container styles={btnRow}>
             <Button styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
-            <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
             <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected}>Delete Selected</Button>
+            <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
         </Container>
         <%
             if len(rows) == 0 {
