@@ -14,9 +14,20 @@ func ErrorView(parent widgets.Container, message string) error {
     </Container>
 }
 
-func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() error) error {
+func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error) error {
     <Container ref={&viewRoot} styles={content}>
-        <Button onClick={onRefresh}>Refresh</Button>
+        <Container styles={btnRow}>
+            <Button onClick={onRefresh}>Refresh</Button>
+            <%
+                if page > 0 {
+                    <Button onClick={onNewer}>Newer</Button>
+                }
+                if canGoOlder {
+                    <Button onClick={onOlder}>Older</Button>
+                }
+            %>
+            <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
+        </Container>
         <%
             if len(rows) == 0 {
                 <Label text={"No messages."} />
@@ -26,6 +37,7 @@ func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() erro
                     row := rows[i]
                     seq := row.Seq
                     folder := currentFolder
+                    thisPage := page
                     <MessageRow
                         from={row.From}
                         subject={row.Subject}
@@ -34,13 +46,19 @@ func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() erro
                             if err := deleteMessage(seq); err != nil {
                                 return showError(err)
                             }
-                            // Surgical update, no re-fetch -- see
-                            // removeAndShift's own doc comment for why the
-                            // other cached entries need correcting too, not
-                            // just the deleted one dropped.
-                            if cached, ok := folderCache[folder]; ok {
-                                folderCache[folder] = removeAndShift(cached, seq)
+                            // Surgical update, no re-fetch, for this same
+                            // page -- see removeAndShift's own doc comment
+                            // for why the other entries on this page need
+                            // correcting too, not just the deleted one
+                            // dropped. Every OTHER cached page is dropped
+                            // outright instead of also being renumbered --
+                            // see invalidateOtherPages's own doc comment.
+                            key := folderCacheKey{folder, thisPage}
+                            if cached, ok := folderCache[key]; ok {
+                                cached.msgs = removeAndShift(cached.msgs, seq)
+                                folderCache[key] = cached
                             }
+                            invalidateOtherPages(folder, thisPage)
                             return nil
                         }}
                     />
@@ -64,7 +82,7 @@ func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() erro
 // have -- a real gap in the current styling feature set, not swept under
 // the rug.
 func MessageRow(parent uint32, from string, subject string, onOpen func() error, onDelete func() error) error {
-    <Container>
+    <Container styles={rowWrap}>
         <%
             var rowWidget *widgets.Container
             <Container ref={&rowWidget} styles={row}>

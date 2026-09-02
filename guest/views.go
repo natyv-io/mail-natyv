@@ -12,8 +12,8 @@ func ErrorView(parent widgets.Container, message string) error {
 	return natyvBuildErrorView(parent, message)
 }
 
-func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() error) error {
-	return natyvBuildFolderView(parent, rows, onRefresh)
+func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error) error {
+	return natyvBuildFolderView(parent, rows, page, canGoOlder, pageSizeLabel, onNewer, onOlder, onRefresh, onPageSize)
 }
 
 // MessageRow's own top-level <Container> is a purely structural wrapper --

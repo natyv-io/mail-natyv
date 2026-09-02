@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/natyv-io/sdks/go/imap"
@@ -33,27 +34,111 @@ var statusLbl *widgets.Label
 
 var currentFolder = inboxFolder
 
-// folderCache holds the last-fetched message list per folder, keyed by
-// mailbox name -- returning to a folder (the toolbar buttons, or the read
-// view's "< Back") redisplays this instead of hitting IMAP again, since
+// pageSize is how many messages a folder page holds -- see listFolder's
+// own doc comment for the paging scheme itself. One global setting shared
+// by every folder (not per-folder), selectable at runtime via the
+// page-size Dropdown in FolderView -- see setPageSize. Defaults to 5.
+var pageSize = 5
+
+// pageSizeOptions/pageSizeValues are FolderView's own page-size Dropdown
+// choices -- parallel slices since Dropdown's real SDK options are always
+// []string (the label shown per item), so the actual int each one means
+// is looked up by the same index Dropdown's OnSelect hands back.
+var pageSizeOptions = []string{"5", "10", "20"}
+var pageSizeValues = []int{5, 10, 20}
+
+// pageSizeLabel is FolderView's own Dropdown trigger text, built here
+// (not inside views.go.ntx's markup) since natyv prepare's generated
+// view body only ever imports the widgets package plus whatever a real
+// `uses` declaration names -- never a plain import from the .ntx file's
+// own source, which fmt.Sprintf would need.
+func pageSizeLabel() string {
+	return fmt.Sprintf("Page size: %d", pageSize)
+}
+
+// onPageSize is FolderView's own Dropdown onSelect handler -- maps the
+// selected option's index back to the real int size it represents.
+func onPageSize(index int) error {
+	return setPageSize(pageSizeValues[index])
+}
+
+// setPageSize changes how many messages a folder page holds and applies
+// it immediately. Every folder's own already-cached pages and persisted
+// view were built against the *old* page size, so "page 1" under the new
+// size doesn't mean the same messages anymore -- all of it is dropped
+// (every folder reset back to page 0) rather than trying to remap it, and
+// whatever folder is currently on screen (if any) is rebuilt fresh.
+func setPageSize(newSize int) error {
+	pageSize = newSize
+	folderCache = map[folderCacheKey]folderPageData{}
+	for folder := range folderViews {
+		destroyPersistedFolderView(folder)
+	}
+	for folder := range folderPage {
+		folderPage[folder] = 0
+	}
+	if strings.HasPrefix(currentView, "folder:") {
+		return renderFolder(currentFolder, 0, true)
+	}
+	return nil
+}
+
+// folderPage remembers each folder's own current page (0 = most recent),
+// across navigation -- switching back to a folder shows whatever page it
+// was last on, not always the most recent.
+var folderPage = map[string]int{}
+
+// folderCacheKey pairs a folder with a specific page -- each page is
+// fetched and cached independently, since paging means there's no longer
+// one single "this folder's message list" to cache per mailbox.
+type folderCacheKey struct {
+	folder string
+	page   int
+}
+
+type folderPageData struct {
+	msgs       []imap.Message
+	canGoOlder bool
+}
+
+// folderCache holds each already-fetched (folder, page)'s own message
+// list, keyed by folderCacheKey -- returning to a folder+page (the
+// toolbar buttons, the read view's "< Back", or paging back to a page
+// already visited) redisplays this instead of hitting IMAP again, since
 // nothing server-side changes just by looking at a message. Invalidated
 // explicitly wherever we know we've changed a folder's own contents (see
-// sendMessage's own caller in ComposeView, which drops sentFolder's cache
-// entry after a real send so the next visit re-fetches for real).
-var folderCache = map[string][]imap.Message{}
+// invalidateFolder, called after a real send).
+var folderCache = map[folderCacheKey]folderPageData{}
 
-// cachedListFolder returns folderCache's entry for mailbox if present,
-// otherwise fetches it for real via listFolder and caches the result.
-func cachedListFolder(mailbox string, maxCount int) ([]imap.Message, error) {
-	if msgs, ok := folderCache[mailbox]; ok {
-		return msgs, nil
+// cachedListFolder returns folderCache's entry for (folder, page) if
+// present, otherwise fetches it for real via listFolder and caches the
+// result.
+func cachedListFolder(folder string, page int) (folderPageData, error) {
+	key := folderCacheKey{folder, page}
+	if data, ok := folderCache[key]; ok {
+		return data, nil
 	}
-	msgs, err := listFolder(mailbox, maxCount)
+	msgs, canGoOlder, err := listFolder(folder, page, pageSize)
 	if err != nil {
-		return nil, err
+		return folderPageData{}, err
 	}
-	folderCache[mailbox] = msgs
-	return msgs, nil
+	data := folderPageData{msgs: msgs, canGoOlder: canGoOlder}
+	folderCache[key] = data
+	return data, nil
+}
+
+// invalidateOtherPages drops every OTHER cached page of folder besides
+// keepPage -- deleting a message on keepPage shifts every later message's
+// real sequence number down by one (EXPUNGE's own behavior), which would
+// silently desync any other already-cached page's Seq values otherwise.
+// Simplest correct fix: forget them, so the next visit to one re-fetches
+// for real instead of acting on stale sequence numbers.
+func invalidateOtherPages(folder string, keepPage int) {
+	for key := range folderCache {
+		if key.folder == folder && key.page != keepPage {
+			delete(folderCache, key)
+		}
+	}
 }
 
 // inboxRow is FolderView's own simplified per-row shape -- deliberately
@@ -132,8 +217,16 @@ func smallFixed(parent uint32, width, height float32) widgets.Layout {
 // pass -- confirmed live (2026-09-02) that the destroy+rebuild, however
 // fast, produced a real, visible flash on every folder switch, not just a
 // theoretical cost. Only ever rebuilt for real when we know its contents
-// are actually stale (Refresh, or invalidateFolder after a send).
+// are actually stale (Refresh, or invalidateFolder after a send), or when
+// its own page changes.
 var folderViews = map[string]widgets.Container{}
+
+// folderViewPage records which page each folder's own persisted view
+// (folderViews) actually shows -- only ever one page kept alive per
+// folder at a time, not every page ever visited, matching this app's
+// existing memory-efficiency discipline. Paging within a folder always
+// rebuilds, the same as Refresh.
+var folderViewPage = map[string]int{}
 
 // currentView identifies whatever's actually rendered under viewRoot right
 // now (e.g. "folder:INBOX", "message", "compose", "error") -- lets
@@ -172,74 +265,88 @@ func showError(err error) error {
 
 // showFolder is the real entry point every caller outside this section
 // uses (toolbar handlers, MessageDetailView's "< Back"). A no-op if we're
-// already showing exactly this folder. renderFolder does the actual work,
-// and is also used directly by Refresh, which must always force a real
-// rebuild even though the folder itself isn't changing, since its data
-// just did.
+// already showing exactly this folder at its own remembered page.
+// renderFolder does the actual work, and is also used directly by
+// Refresh/paging, which must always force a real rebuild even when the
+// folder itself isn't changing, since what it should show just did.
 func showFolder(folder string) error {
-	if currentView == "folder:"+folder {
+	page := folderPage[folder]
+	if currentView == "folder:"+folder && folderViewPage[folder] == page {
 		return nil
 	}
-	return renderFolder(folder, false)
+	return renderFolder(folder, page, false)
 }
 
-func renderFolder(folder string, forceRebuild bool) error {
-	if root, ok := folderViews[folder]; ok {
-		if !forceRebuild {
-			// Already built and still fresh -- just swap it back in.
-			clearView()
-			currentFolder = folder
-			currentView = "folder:" + folder
-			viewRoot = &root
-			return root.SetVisible(true)
-		}
-		// Known stale (Refresh) -- this persisted root really is going
-		// away, not just being hidden, so destroy it directly rather
-		// than going through clearView's hide-only "folder:" handling.
-		root.Destroy()
-		delete(folderViews, folder)
-		if viewRoot != nil && *viewRoot == root {
-			viewRoot = nil
-		}
-	} else {
-		clearView()
+// destroyPersistedFolderView tears down folder's own persisted root (if
+// any) for real -- shared by every renderFolder path that knows the
+// persisted view can't just be reused (a different page, or forced).
+func destroyPersistedFolderView(folder string) {
+	root, ok := folderViews[folder]
+	if !ok {
+		return
 	}
+	root.Destroy()
+	delete(folderViews, folder)
+	delete(folderViewPage, folder)
+	if viewRoot != nil && *viewRoot == root {
+		viewRoot = nil
+	}
+}
+
+func renderFolder(folder string, page int, forceRebuild bool) error {
+	if root, ok := folderViews[folder]; ok && !forceRebuild && folderViewPage[folder] == page {
+		// Already built, still fresh, and showing this exact page --
+		// just swap it back in.
+		clearView()
+		currentFolder = folder
+		currentView = "folder:" + folder
+		viewRoot = &root
+		return root.SetVisible(true)
+	}
+	destroyPersistedFolderView(folder)
+	clearView()
 
 	currentFolder = folder
 	currentView = "folder:" + folder
-	msgs, err := cachedListFolder(folder, 20)
+	folderPage[folder] = page
+	data, err := cachedListFolder(folder, page)
 	if err != nil {
 		return showError(err)
 	}
-	if err := FolderView(*contentArea, toInboxRows(msgs), func() error {
-		// Manual refresh -- Inbox's own cache is never auto-invalidated
-		// by a send (unlike Sent, which we know for certain gets a new
-		// entry), so this is the way to actually see new mail without
-		// restarting the app.
-		delete(folderCache, folder)
-		return renderFolder(folder, true)
-	}); err != nil {
+	if err := FolderView(*contentArea, toInboxRows(data.msgs), page, data.canGoOlder, pageSizeLabel(),
+		func() error { return renderFolder(folder, page-1, false) },
+		func() error { return renderFolder(folder, page+1, false) },
+		func() error {
+			// Manual refresh -- Inbox's own cache is never auto-invalidated
+			// by a send (unlike Sent, which we know for certain gets a new
+			// entry), so this is the way to actually see new mail without
+			// restarting the app.
+			delete(folderCache, folderCacheKey{folder, page})
+			return renderFolder(folder, page, true)
+		},
+		onPageSize,
+	); err != nil {
 		return err
 	}
 	folderViews[folder] = *viewRoot
+	folderViewPage[folder] = page
 	return nil
 }
 
-// invalidateFolder drops both folder's cached message list and its own
-// persisted view (if built) -- for the one case a folder's real contents
-// change from *outside* its own Refresh button (a send always changes
-// Sent's contents). Without dropping the persisted view too, the next
-// visit would instantly swap back in a now-stale widget tree instead of
-// rebuilding with fresh data.
+// invalidateFolder drops every one of folder's cached pages and its own
+// persisted view (if built), and resets it back to page 0 -- for the one
+// case a folder's real contents change from *outside* its own Refresh
+// button (a send always changes Sent's contents). Without dropping the
+// persisted view too, the next visit would instantly swap back in a
+// now-stale widget tree instead of rebuilding with fresh data.
 func invalidateFolder(folder string) {
-	delete(folderCache, folder)
-	if root, ok := folderViews[folder]; ok {
-		root.Destroy()
-		delete(folderViews, folder)
-		if viewRoot != nil && *viewRoot == root {
-			viewRoot = nil
+	for key := range folderCache {
+		if key.folder == folder {
+			delete(folderCache, key)
 		}
 	}
+	folderPage[folder] = 0
+	destroyPersistedFolderView(folder)
 }
 
 // removeAndShift drops the message whose sequence number is deletedSeq and
@@ -273,7 +380,8 @@ func removeAndShift(msgs []imap.Message, deletedSeq int) []imap.Message {
 // reusing its truncated strings here would clip text that doesn't
 // actually need clipping at this width).
 func headerFor(seq int) (from, subject string) {
-	for _, m := range folderCache[currentFolder] {
+	data := folderCache[folderCacheKey{currentFolder, folderPage[currentFolder]}]
+	for _, m := range data.msgs {
 		if m.Seq == seq {
 			return m.From, m.Subject
 		}

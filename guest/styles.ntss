@@ -20,7 +20,18 @@ content {
   direction: topToBottom
   width: grow
   height: grow
-  childGap: 8
+  childGap: 4
+}
+
+// The purely-structural per-row wrapper MessageRow needs for its own
+// ref-scoping trick (see views.go.ntx's own doc comment on it) -- a bare
+// <Container> otherwise carries an unremovable 8px default padding on
+// every side, which was stacking with `row`'s own padding below to
+// visibly space rows much further apart than intended. Zeroing it out
+// here (real NTSS padding override, 2026-09-02) removes that with no
+// visual role of its own to lose.
+rowWrap {
+  padding: 0
 }
 
 row {
@@ -28,6 +39,7 @@ row {
   width: grow
   height: fit
   childGap: 2
+  padding: 4
 }
 
 field {

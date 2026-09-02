@@ -30,22 +30,33 @@ func connectIMAP() error {
 	return nil
 }
 
-// listFolder selects mailbox and returns up to the maxCount most recent
-// message headers (lowest sequence number first -- callers wanting
-// newest-first should reverse).
-func listFolder(mailbox string, maxCount int) ([]imap.Message, error) {
+// listFolder selects mailbox and returns page's own message headers
+// (lowest sequence number first -- callers wanting newest-first should
+// reverse), pageSize messages per page. Page 0 is the pageSize most
+// recent messages, page 1 the pageSize before that, and so on. canGoOlder
+// reports whether any messages exist before this page's own range (i.e.
+// whether a real "Older" page exists) -- computed straight from this same
+// fetch's own real Exists/from, not a remembered total, so a real change
+// in the mailbox's contents between page views is reflected immediately
+// rather than compounding.
+func listFolder(mailbox string, page, pageSize int) (msgs []imap.Message, canGoOlder bool, err error) {
 	info, err := imapClient.Select(mailbox)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if info.Exists == 0 {
-		return nil, nil
+	to := info.Exists - page*pageSize
+	if to < 1 {
+		return nil, false, nil
 	}
-	from := info.Exists - maxCount + 1
+	from := to - pageSize + 1
 	if from < 1 {
 		from = 1
 	}
-	return imapClient.FetchHeaders(from, info.Exists)
+	msgs, err = imapClient.FetchHeaders(from, to)
+	if err != nil {
+		return nil, false, err
+	}
+	return msgs, from > 1, nil
 }
 
 // readMessageBody re-selects currentFolder before fetching -- a folder
