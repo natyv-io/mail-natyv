@@ -1,7 +1,14 @@
+// Real, hardcoded natyv-core limitation (2026-09-02, confirmed by reading
+// Label.zig): text always renders at rgb(220,220,220) -- no NTSS override
+// exists. Every color below stays dark enough for that fixed light-gray
+// text to stay legible; a light theme genuinely isn't reachable today
+// without a real host-side text-color feature.
+
 root {
   direction: topToBottom
   width: grow
   height: grow
+  backgroundColor: "#14161AFF"
 }
 
 toolbar {
@@ -14,13 +21,15 @@ toolbar {
 
 toolbarBtn {
   width: grow
+  backgroundColor: "#20242CFF"
+  cornerRadius: {8, 8, 8, 8}
 }
 
 content {
   direction: topToBottom
   width: grow
   height: grow
-  childGap: 4
+  childGap: 8
 }
 
 // The purely-structural per-row wrapper MessageRow needs for its own
@@ -39,7 +48,9 @@ row {
   width: grow
   height: fit
   childGap: 2
-  padding: 4
+  padding: 10
+  backgroundColor: "#1E212AFF"
+  cornerRadius: {10, 10, 10, 10}
 }
 
 field {
@@ -56,4 +67,22 @@ btnRow {
 bodyArea {
   width: grow
   height: grow
+}
+
+// Button color roles, applied on top of each <Button>'s own default fixed
+// size -- shared across the toolbar's own children (via toolbarBtn above)
+// and every dynamic view.
+primaryBtn {
+  backgroundColor: "#3B6BF5FF"
+  cornerRadius: {6, 6, 6, 6}
+}
+
+secondaryBtn {
+  backgroundColor: "#2A2E37FF"
+  cornerRadius: {6, 6, 6, 6}
+}
+
+dangerBtn {
+  backgroundColor: "#C1443FFF"
+  cornerRadius: {6, 6, 6, 6}
 }

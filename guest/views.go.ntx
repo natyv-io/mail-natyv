@@ -17,13 +17,13 @@ func ErrorView(parent widgets.Container, message string) error {
 func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error) error {
     <Container ref={&viewRoot} styles={content}>
         <Container styles={btnRow}>
-            <Button onClick={onRefresh}>Refresh</Button>
+            <Button styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
             <%
                 if page > 0 {
-                    <Button onClick={onNewer}>Newer</Button>
+                    <Button styles={secondaryBtn} onClick={onNewer}>Newer</Button>
                 }
                 if canGoOlder {
-                    <Button onClick={onOlder}>Older</Button>
+                    <Button styles={secondaryBtn} onClick={onOlder}>Older</Button>
                 }
             %>
             <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
@@ -89,8 +89,8 @@ func MessageRow(parent uint32, from string, subject string, onOpen func() error,
                 <Label text={from} styles={field} />
                 <Label text={subject} styles={field} />
                 <Container styles={btnRow}>
-                    <Button onClick={onOpen}>Open</Button>
-                    <Button onClick={func() error {
+                    <Button styles={primaryBtn} onClick={onOpen}>Open</Button>
+                    <Button styles={dangerBtn} onClick={func() error {
                         if err := onDelete(); err != nil {
                             return err
                         }
@@ -105,7 +105,7 @@ func MessageRow(parent uint32, from string, subject string, onOpen func() error,
 
 func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
     <Container ref={&viewRoot} styles={content}>
-        <Button onClick={onBack}>< Back</Button>
+        <Button styles={secondaryBtn} onClick={onBack}>< Back</Button>
         <Label text={from} styles={field} />
         <Label text={subject} styles={field} />
         <TextArea text={decodeMimeBody(body)} styles={bodyArea} />
@@ -118,7 +118,7 @@ func ComposeView(parent widgets.Container) error {
         <TextField ref={&subjField} styles={field} placeholder="Subject" />
         <TextArea ref={&bodyField} styles={field}>Body</TextArea>
         <Label ref={&statusLbl} />
-        <Button onClick={func() error {
+        <Button styles={primaryBtn} onClick={func() error {
             to, _ := toField.Text()
             subject, _ := subjField.Text()
             body, _ := bodyField.Text()
