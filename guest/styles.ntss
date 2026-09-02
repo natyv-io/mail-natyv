@@ -53,6 +53,28 @@ row {
   cornerRadius: {10, 10, 10, 10}
 }
 
+// The checkbox+text-stack row inside a card -- leftToRight so the
+// checkbox sits to the left of the from/subject text, not stacked above
+// it the way row's own direction (used when row had no checkbox) is.
+rowContent {
+  direction: leftToRight
+  width: grow
+  childGap: 8
+  alignY: center
+}
+
+// from/subject stacked vertically, to the right of the checkbox.
+rowText {
+  direction: topToBottom
+  width: grow
+  childGap: 2
+}
+
+rowCheckbox {
+  width: 24
+  height: 24
+}
+
 field {
   width: grow
 }
@@ -82,7 +104,15 @@ secondaryBtn {
   cornerRadius: {6, 6, 6, 6}
 }
 
+// Only ever used for "Delete Selected" -- wider than a Button's own
+// hardcoded 120px default since that label is longer than any other
+// button's in this app. Real, disclosed natyv limitation: Button has no
+// font-driven text measurement at all, so a longer label needs its own
+// explicit width -- there's no "just let it grow to fit the text" option
+// today the way there is for a Container (see fitSizing's own doc
+// comment in shared's Codegen.zig).
 dangerBtn {
   backgroundColor: "#C1443FFF"
   cornerRadius: {6, 6, 6, 6}
+  width: 190
 }

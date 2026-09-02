@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/natyv-io/sdks/go/imap"
@@ -228,6 +229,112 @@ var folderViews = map[string]widgets.Container{}
 // rebuilds, the same as Refresh.
 var folderViewPage = map[string]int{}
 
+// -- Row selection (checkbox + batch delete) --
+//
+// Real, deliberate v1 scope: selection only ever exists for whichever
+// folder page is *currently on screen*. Switching away -- even back to a
+// folder view that's kept alive and simply reused (folderViews) -- always
+// clears it (see clearView's own "folder:" branch below), rather than
+// tracking it per (folder, page) the way folderCache/folderViews do. This
+// avoids two real problems for one deliberate cost: Seq numbers are only
+// unique *within* one mailbox, so a bare int-keyed map shared across
+// folders would collide (Inbox's seq 3 and Sent's seq 3 are unrelated
+// messages); and a page whose own widgets are hidden, not destroyed,
+// can't actually receive new clicks anyway, so nothing is lost by
+// resetting its logical selection the moment it stops being the one
+// visible page -- the checkboxes themselves are also explicitly reset to
+// unchecked at the same time, so the visible state never lies about it.
+var selectedSeqs = map[int]bool{}
+var rowWidgets = map[int]widgets.Container{}
+var rowCheckboxes = map[int]widgets.Checkbox{}
+
+// deleteSelectedBtn is the currently-visible page's own "Delete Selected"
+// button -- single package-level slot, same reasoning as viewRoot/toField
+// above: only one folder page is ever actually visible (and thus
+// receiving clicks) at a time.
+var deleteSelectedBtn *widgets.Button
+
+// registerRowWidget/registerRowCheckbox are called once per real
+// MessageRow build (views.go.ntx), right after creating each -- lets this
+// file act on a specific row later (checkbox toggle bookkeeping, direct
+// destroy after a batch delete) without MessageRow's own signature
+// needing to return anything beyond its already-real `error`.
+func registerRowWidget(seq int, w widgets.Container)   { rowWidgets[seq] = w }
+func registerRowCheckbox(seq int, cb widgets.Checkbox) { rowCheckboxes[seq] = cb }
+
+// onRowSelect is MessageRow's own Checkbox onClick handler.
+func onRowSelect(seq int, checked bool) error {
+	if checked {
+		selectedSeqs[seq] = true
+	} else {
+		delete(selectedSeqs, seq)
+	}
+	updateDeleteSelectedLabel()
+	return nil
+}
+
+func updateDeleteSelectedLabel() {
+	if deleteSelectedBtn == nil {
+		return
+	}
+	_ = deleteSelectedBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(selectedSeqs)))
+}
+
+// resetSelectionState clears whatever's currently selected -- called
+// whenever the currently-displayed folder page is about to stop being the
+// one actually on screen (hidden-but-kept-alive) or is being rebuilt from
+// scratch. uncheckWidgets is true only for the "hidden but still alive"
+// case -- a page about to be destroyed outright has nothing left worth
+// resetting.
+func resetSelectionState(uncheckWidgets bool) {
+	if uncheckWidgets {
+		for _, cb := range rowCheckboxes {
+			_ = cb.SetChecked(false)
+		}
+	}
+	selectedSeqs = map[int]bool{}
+	rowWidgets = map[int]widgets.Container{}
+	rowCheckboxes = map[int]widgets.Checkbox{}
+	updateDeleteSelectedLabel()
+}
+
+// onDeleteSelected is the toolbar's own single "Delete Selected" button
+// handler -- deletes every currently-checked row in one batch. Processes
+// highest Seq first: deleting a message shifts every later message's real
+// sequence number down by one (EXPUNGE's own behavior, see
+// removeAndShift's own doc comment), so deleting top-down keeps every
+// still-pending lower Seq valid throughout the batch instead of racing
+// its own earlier deletions.
+func onDeleteSelected() error {
+	seqs := make([]int, 0, len(selectedSeqs))
+	for seq := range selectedSeqs {
+		seqs = append(seqs, seq)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(seqs)))
+
+	folder := currentFolder
+	page := folderPage[folder]
+	key := folderCacheKey{folder, page}
+	cached := folderCache[key]
+	for _, seq := range seqs {
+		if err := deleteMessage(seq); err != nil {
+			return showError(err)
+		}
+		cached.msgs = removeAndShift(cached.msgs, seq)
+		if w, ok := rowWidgets[seq]; ok {
+			w.Destroy()
+		}
+	}
+	folderCache[key] = cached
+	invalidateOtherPages(folder, page)
+
+	selectedSeqs = map[int]bool{}
+	rowWidgets = map[int]widgets.Container{}
+	rowCheckboxes = map[int]widgets.Checkbox{}
+	updateDeleteSelectedLabel()
+	return nil
+}
+
 // currentView identifies whatever's actually rendered under viewRoot right
 // now (e.g. "folder:INBOX", "message", "compose", "error") -- lets
 // showFolder tell "already showing this" apart from "showing something
@@ -247,6 +354,7 @@ func clearView() {
 		return
 	}
 	if strings.HasPrefix(currentView, "folder:") {
+		resetSelectionState(true)
 		_ = viewRoot.SetVisible(false)
 		viewRoot = nil
 		return
@@ -305,6 +413,7 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 	}
 	destroyPersistedFolderView(folder)
 	clearView()
+	resetSelectionState(false)
 
 	currentFolder = folder
 	currentView = "folder:" + folder
@@ -325,11 +434,13 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 			return renderFolder(folder, page, true)
 		},
 		onPageSize,
+		onDeleteSelected,
 	); err != nil {
 		return err
 	}
 	folderViews[folder] = *viewRoot
 	folderViewPage[folder] = page
+	updateDeleteSelectedLabel()
 	return nil
 }
 

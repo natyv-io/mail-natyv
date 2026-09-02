@@ -14,7 +14,7 @@ func ErrorView(parent widgets.Container, message string) error {
     </Container>
 }
 
-func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error) error {
+func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error) error {
     <Container ref={&viewRoot} styles={content}>
         <Container styles={btnRow}>
             <Button styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
@@ -27,6 +27,7 @@ func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder 
                 }
             %>
             <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
+            <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected}>Delete Selected</Button>
         </Container>
         <%
             if len(rows) == 0 {
@@ -36,31 +37,12 @@ func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder 
                 for i := len(rows) - 1; i >= 0; i-- {
                     row := rows[i]
                     seq := row.Seq
-                    folder := currentFolder
-                    thisPage := page
                     <MessageRow
+                        seq={seq}
                         from={row.From}
                         subject={row.Subject}
                         onOpen={func() error { return showMessage(seq) }}
-                        onDelete={func() error {
-                            if err := deleteMessage(seq); err != nil {
-                                return showError(err)
-                            }
-                            // Surgical update, no re-fetch, for this same
-                            // page -- see removeAndShift's own doc comment
-                            // for why the other entries on this page need
-                            // correcting too, not just the deleted one
-                            // dropped. Every OTHER cached page is dropped
-                            // outright instead of also being renumbered --
-                            // see invalidateOtherPages's own doc comment.
-                            key := folderCacheKey{folder, thisPage}
-                            if cached, ok := folderCache[key]; ok {
-                                cached.msgs = removeAndShift(cached.msgs, seq)
-                                folderCache[key] = cached
-                            }
-                            invalidateOtherPages(folder, thisPage)
-                            return nil
-                        }}
+                        onSelect={onRowSelect}
                     />
                 }
             }
@@ -70,35 +52,38 @@ func FolderView(parent widgets.Container, rows []inboxRow, page int, canGoOlder 
 
 // MessageRow's own top-level <Container> is a purely structural wrapper --
 // <%...%> can't be a composer's own top-level node (Parser.zig only ever
-// parses exactly one top-level element), so declaring rowWidget as a real
-// local variable -- needed so ref={&rowWidget} binds correctly per
-// invocation, not to a single shared package-level slot the way every
-// other ref={&x} in this app does, since FolderView's own loop creates
-// many MessageRows alive at once -- has to happen inside a <%...%> child,
-// one level down. Real, disclosed cost: today's styling system has no
-// NTSS field to zero out a bare <Container>'s own hardcoded default
-// padding (8px on every side), so this wrapper adds a small, visible 8px
-// inset around every row that the original hand-written version didn't
-// have -- a real gap in the current styling feature set, not swept under
-// the rug.
-func MessageRow(parent uint32, from string, subject string, onOpen func() error, onDelete func() error) error {
+// parses exactly one top-level element), so declaring rowWidget/checkbox
+// as real local variables -- needed so ref={&rowWidget}/ref={&checkbox}
+// bind correctly per invocation, not to a single shared package-level
+// slot the way every other ref={&x} in this app does, since FolderView's
+// own loop creates many MessageRows alive at once -- has to happen inside
+// a <%...%> child, one level down. The row itself is directly clickable
+// (onClick={onOpen} on rowWidget, a real Container -- 2026-09-02) rather
+// than a separate "Open" button; a real natyv-core fix made this possible
+// and correctly suppresses the row's own click when the nested Checkbox
+// is what's actually clicked.
+func MessageRow(parent uint32, seq int, from string, subject string, onOpen func() error, onSelect func(seq int, checked bool) error) error {
     <Container styles={rowWrap}>
         <%
             var rowWidget *widgets.Container
-            <Container ref={&rowWidget} styles={row}>
-                <Label text={from} styles={field} />
-                <Label text={subject} styles={field} />
-                <Container styles={btnRow}>
-                    <Button styles={primaryBtn} onClick={onOpen}>Open</Button>
-                    <Button styles={dangerBtn} onClick={func() error {
-                        if err := onDelete(); err != nil {
+            var checkbox *widgets.Checkbox
+            <Container ref={&rowWidget} styles={row} onClick={onOpen}>
+                <Container styles={rowContent}>
+                    <Checkbox styles={rowCheckbox} onClick={func() error {
+                        checked, err := checkbox.Checked()
+                        if err != nil {
                             return err
                         }
-                        rowWidget.Destroy()
-                        return nil
-                    }}>Delete</Button>
+                        return onSelect(seq, checked)
+                    }} ref={&checkbox} />
+                    <Container styles={rowText}>
+                        <Label text={from} styles={field} />
+                        <Label text={subject} styles={field} />
+                    </Container>
                 </Container>
             </Container>
+            registerRowWidget(seq, *rowWidget)
+            registerRowCheckbox(seq, *checkbox)
         %>
     </Container>
 }
