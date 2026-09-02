@@ -48,11 +48,20 @@ content {
 // using for the label/toolbar/pager, regardless of how many real rows
 // are inside it -- otherwise, with few rows, the pager would sit right
 // below them instead of pinned to the window's own bottom edge.
+// scroll: vertical (2026-09-02) -- a larger page size (Page size: 10/20)
+// can hold more rows than the window's own fixed height fits; without
+// this, rows simply overflowed past the window edge and dragged pagerRow
+// off-screen with them (height: grow above only ever solved the opposite
+// problem: too FEW rows leaving the pager stranded above the bottom
+// edge). Real, generic Clay-level scroll+clip (see natyv-core's
+// ScrollClip.zig) -- same mechanism Table's own viewport already uses,
+// just applied to a plain Container here.
 rowsList {
   direction: topToBottom
   width: grow
   height: grow
   childGap: 4
+  scroll: vertical
 }
 
 // padding trimmed from 10 -> 5 (2026-09-02), same "fit a full page on
