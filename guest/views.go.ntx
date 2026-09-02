@@ -41,9 +41,9 @@ func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, p
             }
         %>
         <Container styles={pagerRow}>
-            <Button ref={&olderBtn} styles={secondaryBtn, pagerBtn} onClick={onOlder} text={"<"} />
+            <Button ref={&newerBtn} styles={secondaryBtn, pagerBtn} onClick={onNewer} text={"<"} />
             <Label text={pageLabel} styles={pagerLabel} />
-            <Button ref={&newerBtn} styles={secondaryBtn, pagerBtn} onClick={onNewer} text={">"} />
+            <Button ref={&olderBtn} styles={secondaryBtn, pagerBtn} onClick={onOlder} text={">"} />
             <%
                 _ = olderBtn.SetEnabled(canGoOlder)
                 _ = newerBtn.SetEnabled(page > 0)
