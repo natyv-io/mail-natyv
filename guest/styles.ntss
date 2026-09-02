@@ -26,9 +26,22 @@ content {
 row {
   direction: topToBottom
   width: grow
+  height: fit
   childGap: 2
 }
 
 field {
   width: grow
+}
+
+btnRow {
+  direction: leftToRight
+  width: grow
+  height: fit
+  childGap: 4
+}
+
+bodyArea {
+  width: grow
+  height: grow
 }

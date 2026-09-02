@@ -48,7 +48,16 @@ func listFolder(mailbox string, maxCount int) ([]imap.Message, error) {
 	return imapClient.FetchHeaders(from, info.Exists)
 }
 
+// readMessageBody re-selects currentFolder before fetching -- a folder
+// view rendered from folderCache (a cache hit) never re-issues a real
+// IMAP SELECT, so the connection's actually-selected mailbox can lag
+// behind whatever folder the UI is currently showing; fetching a body
+// against the wrong mailbox is what "imap: no such message" really means
+// here, not a genuinely missing message (confirmed live, 2026-09-02).
 func readMessageBody(seq int) (string, error) {
+	if _, err := imapClient.Select(currentFolder); err != nil {
+		return "", err
+	}
 	return imapClient.FetchBody(seq)
 }
 

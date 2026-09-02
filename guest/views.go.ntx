@@ -1,0 +1,154 @@
+package main
+
+import "github.com/natyv-io/sdks/go/widgets"
+
+expose ErrorView
+expose FolderView
+expose MessageRow
+expose MessageDetailView
+expose ComposeView
+
+func ErrorView(parent widgets.Container, message string) error {
+    <Container ref={&viewRoot} styles={content}>
+        <Label text={message} />
+    </Container>
+}
+
+func FolderView(parent widgets.Container, rows []inboxRow, onRefresh func() error) error {
+    <Container ref={&viewRoot} styles={content}>
+        <Button onClick={onRefresh}>Refresh</Button>
+        <%
+            if len(rows) == 0 {
+                <Label text={"No messages."} />
+            } else {
+                // Newest first.
+                for i := len(rows) - 1; i >= 0; i-- {
+                    row := rows[i]
+                    seq := row.Seq
+                    folder := currentFolder
+                    <MessageRow
+                        from={row.From}
+                        subject={row.Subject}
+                        onOpen={func() error { return showMessage(seq) }}
+                        onDelete={func() error {
+                            if err := deleteMessage(seq); err != nil {
+                                return showError(err)
+                            }
+                            // Surgical update, no re-fetch -- see
+                            // removeAndShift's own doc comment for why the
+                            // other cached entries need correcting too, not
+                            // just the deleted one dropped.
+                            if cached, ok := folderCache[folder]; ok {
+                                folderCache[folder] = removeAndShift(cached, seq)
+                            }
+                            return nil
+                        }}
+                    />
+                }
+            }
+        %>
+    </Container>
+}
+
+// MessageRow's own top-level <Container> is a purely structural wrapper --
+// <%...%> can't be a composer's own top-level node (Parser.zig only ever
+// parses exactly one top-level element), so declaring rowWidget as a real
+// local variable -- needed so ref={&rowWidget} binds correctly per
+// invocation, not to a single shared package-level slot the way every
+// other ref={&x} in this app does, since FolderView's own loop creates
+// many MessageRows alive at once -- has to happen inside a <%...%> child,
+// one level down. Real, disclosed cost: today's styling system has no
+// NTSS field to zero out a bare <Container>'s own hardcoded default
+// padding (8px on every side), so this wrapper adds a small, visible 8px
+// inset around every row that the original hand-written version didn't
+// have -- a real gap in the current styling feature set, not swept under
+// the rug.
+func MessageRow(parent uint32, from string, subject string, onOpen func() error, onDelete func() error) error {
+    <Container>
+        <%
+            var rowWidget *widgets.Container
+            <Container ref={&rowWidget} styles={row}>
+                <Label text={from} styles={field} />
+                <Label text={subject} styles={field} />
+                <Container styles={btnRow}>
+                    <Button onClick={onOpen}>Open</Button>
+                    <Button onClick={func() error {
+                        if err := onDelete(); err != nil {
+                            return err
+                        }
+                        rowWidget.Destroy()
+                        return nil
+                    }}>Delete</Button>
+                </Container>
+            </Container>
+        %>
+    </Container>
+}
+
+func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
+    <Container ref={&viewRoot} styles={content}>
+        <Button onClick={onBack} text={"< Back"} />
+        <Label text={from} styles={field} />
+        <Label text={subject} styles={field} />
+        <TextArea text={decodeMimeBody(body)} styles={bodyArea} />
+    </Container>
+}
+
+func ComposeView(parent widgets.Container) error {
+    <Container ref={&viewRoot} styles={content}>
+        <TextField ref={&toField} styles={field} placeholder="To" />
+        <TextField ref={&subjField} styles={field} placeholder="Subject" />
+        <TextArea ref={&bodyField} styles={field}>Body</TextArea>
+        <Label ref={&statusLbl} />
+        <Button onClick={func() error {
+            to, _ := toField.Text()
+            subject, _ := subjField.Text()
+            body, _ := bodyField.Text()
+
+            if err := statusLbl.SetText(""); err != nil {
+                return err
+            }
+            // Real, deliberate visual feedback during the blocking send
+            // call: this natyv_dispatch handler runs on the worker
+            // thread and blocks for the real network round trip, but
+            // widget creation itself mutates the shared registry
+            // immediately (before that blocking call runs) -- SDL's own
+            // render loop, on the separate main thread, keeps drawing
+            // independently the whole time, so the spinner genuinely
+            // animates live during the send, not just at the very end.
+            spinner, serr := widgets.CreateSpinner(smallFixed(uint32(*viewRoot), 60, 16))
+            if serr != nil {
+                return serr
+            }
+            sendErr := sendMessage(to, subject, body)
+            spinner.Destroy()
+
+            if sendErr != nil {
+                return statusLbl.SetText("Error: " + sendErr.Error())
+            }
+
+            // A real send always changes Sent's own contents -- drop its
+            // cache entry (and its persisted view, if built) so the next
+            // visit rebuilds with fresh data instead of reusing a
+            // now-stale one. Inbox is left alone even though a self-send
+            // would technically affect it too: invalidating it on every
+            // send would mean paying a real refetch for the common case
+            // (sending to someone else) just to handle a rare one -- the
+            // Refresh button in the folder view is the real, explicit
+            // way to see new mail there.
+            invalidateFolder(sentFolder)
+
+            if err := toField.Clear(); err != nil {
+                return err
+            }
+            if err := subjField.Clear(); err != nil {
+                return err
+            }
+            if err := bodyField.Clear(); err != nil {
+                return err
+            }
+
+            return statusLbl.SetText("Sent!")
+        }}>Send</Button>
+    </Container>
+}

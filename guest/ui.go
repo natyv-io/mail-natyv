@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/natyv-io/sdks/go/imap"
 	"github.com/natyv-io/sdks/go/widgets"
 )
@@ -12,10 +14,22 @@ import (
 var contentArea *widgets.Container
 
 // viewRoot is the current dynamic view's own single root Container --
-// swapped out on every view switch. Destroying it alone cascades through
-// everything the view created (natyv-core's own destroy now cascades to
-// every real Clay descendant), so no per-widget tracking is needed.
-var viewRoot widgets.Container
+// bound directly by each view composer's own top-level `ref={&viewRoot}`
+// (views.go.ntx), replacing what a hand-written newViewRoot() used to do.
+// Pointer type, same reason as contentArea above -- ref={&x} always
+// generates "x = &<createdVar>". Swapped out on every view switch.
+// Destroying it alone cascades through everything the view created
+// (natyv-core's own destroy now cascades to every real Clay descendant),
+// so no per-widget tracking is needed.
+var viewRoot *widgets.Container
+
+// toField/subjField/bodyField/statusLbl are bound by ComposeView's own
+// ref={&x} attributes -- its Send button's handler (also written directly
+// in views.go.ntx) reads/clears them by these same package-level names.
+var toField *widgets.TextField
+var subjField *widgets.TextField
+var bodyField *widgets.TextArea
+var statusLbl *widgets.Label
 
 var currentFolder = inboxFolder
 
@@ -24,8 +38,8 @@ var currentFolder = inboxFolder
 // view's "< Back") redisplays this instead of hitting IMAP again, since
 // nothing server-side changes just by looking at a message. Invalidated
 // explicitly wherever we know we've changed a folder's own contents (see
-// sendMessage's own caller in showCompose, which drops sentFolder's
-// cache entry after a real send so the next visit re-fetches for real).
+// sendMessage's own caller in ComposeView, which drops sentFolder's cache
+// entry after a real send so the next visit re-fetches for real).
 var folderCache = map[string][]imap.Message{}
 
 // cachedListFolder returns folderCache's entry for mailbox if present,
@@ -42,106 +56,190 @@ func cachedListFolder(mailbox string, maxCount int) ([]imap.Message, error) {
 	return msgs, nil
 }
 
-// growFixed is Width: Grow, Height: Fixed(height) -- the right shape for
-// any leaf widget (Label/Button/TextField): Fit-sizing a leaf collapses it
-// toward zero height, since natyv has no real font-driven text
-// measurement yet (see the SDK's own Sizing.Fit doc comment).
-func growFixed(parent uint32, height float32) widgets.Layout {
-	l := widgets.ParentID(parent)
-	l.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Fixed(height)}
-	return l
+// inboxRow is FolderView's own simplified per-row shape -- deliberately
+// not imap.Message directly: natyv prepare's real codegen only ever
+// forwards the widgets import into a generated file, never a composer's
+// own signature-only imports, so a composer parameter typed []imap.Message
+// fails to compile in the generated output (confirmed the hard way, a
+// real gap worth a dedicated fix separately -- not a silent workaround
+// papering over a design choice). Using a plain package-local type here
+// needs no import at all, since views.go.ntx is the same package. Also a
+// real simplification: the unread-indicator formatting moves here, next
+// to the real imap.Message it reads, instead of living inside the
+// <%...%> loop.
+type inboxRow struct {
+	From    string
+	Subject string
+	Seq     int
+}
+
+// truncateWithEllipsis clips s to at most maxRunes runes (never splitting a
+// multi-byte UTF-8 sequence), appending "..." when it actually had to cut
+// something. Real, disclosed mitigation for a real natyv limitation: Label
+// has no font-driven text measurement and a fixed height that doesn't grow
+// to fit wrapped text (see Breadcrumbs' own approxLabelWidth heuristic
+// elsewhere in the SDK for the same underlying gap) -- a sender/subject
+// long enough to wrap to a second line visibly overlaps whatever widget
+// comes after it. Preventing the wrap in the first place, rather than
+// trying to grow the box to fit it, is the only real fix available today.
+func truncateWithEllipsis(s string, maxRunes int) string {
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
+		return s
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func toInboxRows(msgs []imap.Message) []inboxRow {
+	rows := make([]inboxRow, len(msgs))
+	for i, msg := range msgs {
+		from := msg.From
+		if !msg.Seen {
+			from = "* " + from
+		}
+		// Real headers can carry both a display name and a bracketed
+		// address (e.g. `Google <no-reply@accounts.google.com>`) --
+		// confirmed via a real click-through that this alone can exceed
+		// one line's worth of characters even before truncation. Truncate
+		// the *fully assembled* string, not a sub-piece before
+		// concatenation -- truncating `msg.Subject` alone and appending
+		// an unbounded date suffix afterward (an earlier, real bug in
+		// this same function) just moves the overflow to a different
+		// spot rather than fixing it.
+		from = truncateWithEllipsis(from, 24)
+		subject := truncateWithEllipsis(msg.Subject+"  ("+msg.Date+")", 26)
+		rows[i] = inboxRow{From: from, Subject: subject, Seq: msg.Seq}
+	}
+	return rows
 }
 
 // smallFixed is a small, non-Grow fixed-size shape -- for a decorative
-// widget like Spinner that shouldn't stretch to fill the row.
+// widget like Spinner that shouldn't stretch to fill the row. Still real,
+// hand-written Go (not `.ntx`): ComposeView's send handler creates the
+// spinner dynamically, mid-event, not as part of the view's own initial
+// markup, which `.ntx` doesn't have a construct for.
 func smallFixed(parent uint32, width, height float32) widgets.Layout {
 	l := widgets.ParentID(parent)
 	l.Sizing = widgets.Sizing{Width: widgets.Fixed(width), Height: widgets.Fixed(height)}
 	return l
 }
 
-// growBoth is Width: Grow, Height: Grow -- for a body TextArea that should
-// fill whatever vertical space is left in the view.
-func growBoth(parent uint32) widgets.Layout {
-	l := widgets.ParentID(parent)
-	l.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Grow()}
-	return l
-}
+// folderViews holds each already-built folder view's own persisted root
+// Container, keyed by mailbox -- kept alive (hidden, never destroyed) once
+// built, instead of being torn down and rebuilt every time that folder is
+// shown again. Switching between Inbox and Sent (or back to either) is
+// then a plain SetVisible flip, not a real widget-destroy-then-recreate
+// pass -- confirmed live (2026-09-02) that the destroy+rebuild, however
+// fast, produced a real, visible flash on every folder switch, not just a
+// theoretical cost. Only ever rebuilt for real when we know its contents
+// are actually stale (Refresh, or invalidateFolder after a send).
+var folderViews = map[string]widgets.Container{}
 
-// clearView destroys the current view's root (if any) -- cascades through
-// every widget the view created.
+// currentView identifies whatever's actually rendered under viewRoot right
+// now (e.g. "folder:INBOX", "message", "compose", "error") -- lets
+// showFolder tell "already showing this" apart from "showing something
+// else, or nothing yet", and lets clearView tell a persisted folder view
+// (hide, don't destroy) apart from every other view (destroy as before).
+// Every view-showing function below sets this itself, right alongside its
+// own clearView() call, so it's never left stale by a transition this
+// file doesn't know about.
+var currentView string
+
+// clearView retires the current view so a new one can take its place --
+// cascades a real Destroy through every widget the view created, *unless*
+// the current view is a persisted folder view (see folderViews above), in
+// which case it's only hidden, so switching back to it later is instant.
 func clearView() {
-	if viewRoot != 0 {
-		viewRoot.Destroy()
-		viewRoot = 0
+	if viewRoot == nil {
+		return
 	}
-}
-
-// newViewRoot creates a fresh TopToBottom root under contentArea, tracked
-// as the current view for the next clearView() call.
-func newViewRoot() (widgets.Container, error) {
-	l := widgets.ParentID(uint32(*contentArea))
-	l.Direction = widgets.TopToBottom
-	l.ChildGap = 8
-	l.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Grow()}
-	root, err := widgets.CreateContainer(l, false, 0)
-	if err != nil {
-		return 0, err
+	if strings.HasPrefix(currentView, "folder:") {
+		_ = viewRoot.SetVisible(false)
+		viewRoot = nil
+		return
 	}
-	viewRoot = root
-	return root, nil
+	viewRoot.Destroy()
+	viewRoot = nil
 }
 
 func showError(err error) error {
 	clearView()
-	root, rerr := newViewRoot()
-	if rerr != nil {
-		return rerr
-	}
-	_, lerr := widgets.CreateLabel(growFixed(uint32(root), 24), "Error: "+err.Error())
-	return lerr
+	currentView = "error"
+	return ErrorView(*contentArea, "Error: "+err.Error())
 }
 
 // -- Inbox / Sent list view --
 
+// showFolder is the real entry point every caller outside this section
+// uses (toolbar handlers, MessageDetailView's "< Back"). A no-op if we're
+// already showing exactly this folder. renderFolder does the actual work,
+// and is also used directly by Refresh, which must always force a real
+// rebuild even though the folder itself isn't changing, since its data
+// just did.
 func showFolder(folder string) error {
-	clearView()
+	if currentView == "folder:"+folder {
+		return nil
+	}
+	return renderFolder(folder, false)
+}
+
+func renderFolder(folder string, forceRebuild bool) error {
+	if root, ok := folderViews[folder]; ok {
+		if !forceRebuild {
+			// Already built and still fresh -- just swap it back in.
+			clearView()
+			currentFolder = folder
+			currentView = "folder:" + folder
+			viewRoot = &root
+			return root.SetVisible(true)
+		}
+		// Known stale (Refresh) -- this persisted root really is going
+		// away, not just being hidden, so destroy it directly rather
+		// than going through clearView's hide-only "folder:" handling.
+		root.Destroy()
+		delete(folderViews, folder)
+		if viewRoot != nil && *viewRoot == root {
+			viewRoot = nil
+		}
+	} else {
+		clearView()
+	}
+
 	currentFolder = folder
-
-	root, err := newViewRoot()
-	if err != nil {
-		return err
-	}
-	rootID := uint32(root)
-
-	// Manual refresh -- Inbox's own cache is never auto-invalidated by a
-	// send (unlike Sent, which we know for certain gets a new entry), so
-	// this is the way to actually see new mail without restarting the app.
-	refreshBtn, err := widgets.CreateButton(growFixed(rootID, 28), "Refresh")
-	if err != nil {
-		return err
-	}
-	refreshBtn.OnClick(func() error {
-		delete(folderCache, folder)
-		return showFolder(folder)
-	})
-
+	currentView = "folder:" + folder
 	msgs, err := cachedListFolder(folder, 20)
 	if err != nil {
 		return showError(err)
 	}
-	if len(msgs) == 0 {
-		_, err := widgets.CreateLabel(growFixed(rootID, 24), "No messages.")
+	if err := FolderView(*contentArea, toInboxRows(msgs), func() error {
+		// Manual refresh -- Inbox's own cache is never auto-invalidated
+		// by a send (unlike Sent, which we know for certain gets a new
+		// entry), so this is the way to actually see new mail without
+		// restarting the app.
+		delete(folderCache, folder)
+		return renderFolder(folder, true)
+	}); err != nil {
 		return err
 	}
+	folderViews[folder] = *viewRoot
+	return nil
+}
 
-	// Newest first.
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if err := createMessageRow(rootID, msgs[i]); err != nil {
-			return err
+// invalidateFolder drops both folder's cached message list and its own
+// persisted view (if built) -- for the one case a folder's real contents
+// change from *outside* its own Refresh button (a send always changes
+// Sent's contents). Without dropping the persisted view too, the next
+// visit would instantly swap back in a now-stale widget tree instead of
+// rebuilding with fresh data.
+func invalidateFolder(folder string) {
+	delete(folderCache, folder)
+	if root, ok := folderViews[folder]; ok {
+		root.Destroy()
+		delete(folderViews, folder)
+		if viewRoot != nil && *viewRoot == root {
+			viewRoot = nil
 		}
 	}
-	return nil
 }
 
 // removeAndShift drops the message whose sequence number is deletedSeq and
@@ -166,175 +264,40 @@ func removeAndShift(msgs []imap.Message, deletedSeq int) []imap.Message {
 	return updated
 }
 
-func createMessageRow(parent uint32, m imap.Message) error {
-	rowLayout := widgets.ParentID(parent)
-	rowLayout.Direction = widgets.TopToBottom
-	rowLayout.ChildGap = 2
-	rowLayout.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Fit()}
-	row, err := widgets.CreateContainer(rowLayout, false, 0)
-	if err != nil {
-		return err
-	}
-	rowID := uint32(row)
-
-	fromText := m.From
-	if !m.Seen {
-		fromText = "* " + fromText
-	}
-	if _, err := widgets.CreateLabel(growFixed(rowID, 20), fromText); err != nil {
-		return err
-	}
-	if _, err := widgets.CreateLabel(growFixed(rowID, 20), m.Subject+"  ("+m.Date+")"); err != nil {
-		return err
-	}
-
-	btnRowLayout := widgets.ParentID(rowID)
-	btnRowLayout.Direction = widgets.LeftToRight
-	btnRowLayout.ChildGap = 4
-	btnRowLayout.Sizing = widgets.Sizing{Width: widgets.Grow(), Height: widgets.Fit()}
-	btnRow, err := widgets.CreateContainer(btnRowLayout, false, 0)
-	if err != nil {
-		return err
-	}
-	btnRowID := uint32(btnRow)
-
-	seq := m.Seq
-	openBtn, err := widgets.CreateButton(growFixed(btnRowID, 28), "Open")
-	if err != nil {
-		return err
-	}
-	openBtn.OnClick(func() error { return showMessage(seq) })
-
-	deleteBtn, err := widgets.CreateButton(growFixed(btnRowID, 28), "Delete")
-	if err != nil {
-		return err
-	}
-	folder := currentFolder
-	deleteBtn.OnClick(func() error {
-		if err := deleteMessage(seq); err != nil {
-			return showError(err)
-		}
-		// Surgical update, no re-fetch -- see removeAndShift's own doc
-		// comment for why the other cached entries need correcting too,
-		// not just the deleted one dropped.
-		if cached, ok := folderCache[folder]; ok {
-			folderCache[folder] = removeAndShift(cached, seq)
-		}
-		row.Destroy()
-		return nil
-	})
-
-	return nil
-}
-
 // -- Read view --
+
+// headerFor looks up seq's real, untruncated From/Subject from
+// currentFolder's own cached message list -- the same real imap.Message
+// values toInboxRows reads, before that function's own display-only
+// truncation (list rows are much narrower than the detail view, so
+// reusing its truncated strings here would clip text that doesn't
+// actually need clipping at this width).
+func headerFor(seq int) (from, subject string) {
+	for _, m := range folderCache[currentFolder] {
+		if m.Seq == seq {
+			return m.From, m.Subject
+		}
+	}
+	return "", ""
+}
 
 func showMessage(seq int) error {
 	body, err := readMessageBody(seq)
 	if err != nil {
 		return showError(err)
 	}
-
+	from, subject := headerFor(seq)
 	clearView()
-	root, err := newViewRoot()
-	if err != nil {
-		return err
-	}
-	rootID := uint32(root)
-
-	backBtn, err := widgets.CreateButton(growFixed(rootID, 28), "< Back")
-	if err != nil {
-		return err
-	}
-	backBtn.OnClick(func() error { return showFolder(currentFolder) })
-
-	bodyArea, err := widgets.CreateTextArea(growBoth(rootID), "")
-	if err != nil {
-		return err
-	}
-	return bodyArea.SetText(decodeMimeBody(body))
+	currentView = "message"
+	return MessageDetailView(*contentArea, truncateWithEllipsis(from, 100), truncateWithEllipsis(subject, 100), body, func() error { return showFolder(currentFolder) })
 }
 
 // -- Compose view --
 
 func showCompose() error {
 	clearView()
-	root, err := newViewRoot()
-	if err != nil {
-		return err
-	}
-	rootID := uint32(root)
-
-	toField, err := widgets.CreateTextField(growFixed(rootID, 28), "To")
-	if err != nil {
-		return err
-	}
-	subjField, err := widgets.CreateTextField(growFixed(rootID, 28), "Subject")
-	if err != nil {
-		return err
-	}
-	bodyField, err := widgets.CreateTextArea(growBoth(rootID), "Body")
-	if err != nil {
-		return err
-	}
-	statusLbl, err := widgets.CreateLabel(growFixed(rootID, 20), "")
-	if err != nil {
-		return err
-	}
-	sendBtn, err := widgets.CreateButton(growFixed(rootID, 28), "Send")
-	if err != nil {
-		return err
-	}
-	sendBtn.OnClick(func() error {
-		to, _ := toField.Text()
-		subject, _ := subjField.Text()
-		body, _ := bodyField.Text()
-
-		if err := statusLbl.SetText(""); err != nil {
-			return err
-		}
-		// Real, deliberate visual feedback during the blocking send call:
-		// this natyv_dispatch handler runs on the worker thread and blocks
-		// for the real network round trip, but widget creation itself
-		// mutates the shared registry immediately (before that blocking
-		// call runs) -- SDL's own render loop, on the separate main
-		// thread, keeps drawing independently the whole time, so the
-		// spinner genuinely animates live during the send, not just at
-		// the very end.
-		spinner, serr := widgets.CreateSpinner(smallFixed(rootID, 60, 16))
-		if serr != nil {
-			return serr
-		}
-		sendErr := sendMessage(to, subject, body)
-		spinner.Destroy()
-
-		if sendErr != nil {
-			return statusLbl.SetText("Error: " + sendErr.Error())
-		}
-
-		// A real send always changes Sent's own contents -- drop its cache
-		// entry so the next visit re-fetches for real. Inbox is left
-		// alone even though a self-send would technically affect it too:
-		// invalidating it on every send would mean paying a real refetch
-		// for the common case (sending to someone else) just to handle a
-		// rare one -- the Refresh button in the folder view is the real,
-		// explicit way to see new mail there.
-		delete(folderCache, sentFolder)
-
-		if err := toField.Clear(); err != nil {
-			return err
-		}
-		if err := subjField.Clear(); err != nil {
-			return err
-		}
-		if err := bodyField.Clear(); err != nil {
-			return err
-		}
-
-		return statusLbl.SetText("Sent!")
-	})
-
-	return nil
+	currentView = "compose"
+	return ComposeView(*contentArea)
 }
 
 // -- Toolbar handlers, referenced by app.go.ntx's onClick={...} bindings --
