@@ -77,15 +77,26 @@ func folderDisplayName(folder string) string {
 	}
 }
 
-// olderBtn/newerBtn are the currently-visible page's own "< "/"> " pager
-// buttons -- single package-level slots, same reasoning as
-// deleteSelectedBtn: only one folder page is ever actually visible (and
-// thus receiving clicks) at a time. Enabled/disabled per page via
-// Button.SetEnabled right after each is created (see FolderView's own
-// markup) rather than hidden -- always visible so N (the current page)
-// stays put instead of the whole pager shifting around.
+// olderBtn/newerBtn/rowsContainer/pagerLabelWidget/rowWidget are all
+// single package-level ref slots -- only one FolderView/MessageRow build
+// is ever in flight at a time, so a shared slot captured immediately
+// after creation (FolderView's own trailing onBuilt callback, or
+// registerRowWidget) is safe, same reasoning as deleteSelectedBtn below
+// and viewRoot/contentArea above. Enabled/disabled per page via
+// Button.SetEnabled right after each pager button is created (see
+// FolderView's own markup) rather than hidden -- always visible so N (the
+// current page) stays put instead of the whole pager shifting around.
+// rowsContainer is the persisted parent navigatePage rebuilds message
+// rows under; pagerLabelWidget lets navigatePage update the "Page N" text
+// in place; rowWidget is MessageRow's own top-level row Container (see
+// its own doc comment for why it doesn't need a true per-invocation local
+// the way its Checkbox's onClick closure does).
 var olderBtn *widgets.Button
 var newerBtn *widgets.Button
+var rowsContainer *widgets.Container
+var pagerLabelWidget *widgets.Label
+var rowWidget *widgets.Container
+var deleteSelectedBtn *widgets.Button
 
 // setPageSize changes how many messages a folder page holds and applies
 // it immediately. Every folder's own already-cached pages and persisted
@@ -256,69 +267,120 @@ var folderViewPage = map[string]int{}
 // -- Row selection (checkbox + batch delete) --
 //
 // Real, deliberate v1 scope: selection only ever exists for whichever
-// folder page is *currently on screen*. Switching away -- even back to a
-// folder view that's kept alive and simply reused (folderViews) -- always
-// clears it (see clearView's own "folder:" branch below), rather than
-// tracking it per (folder, page) the way folderCache/folderViews do. This
-// avoids two real problems for one deliberate cost: Seq numbers are only
-// unique *within* one mailbox, so a bare int-keyed map shared across
+// folder page is *currently on screen*, kept inside that folder's own
+// *folderUI rather than a shared package-level map -- Seq numbers are
+// only unique *within* one mailbox, so a bare int-keyed map shared across
 // folders would collide (Inbox's seq 3 and Sent's seq 3 are unrelated
-// messages); and a page whose own widgets are hidden, not destroyed,
-// can't actually receive new clicks anyway, so nothing is lost by
-// resetting its logical selection the moment it stops being the one
-// visible page -- the checkboxes themselves are also explicitly reset to
-// unchecked at the same time, so the visible state never lies about it.
-var selectedSeqs = map[int]bool{}
-var rowWidgets = map[int]widgets.Container{}
-var rowCheckboxes = map[int]widgets.Checkbox{}
+// messages).
 
-// deleteSelectedBtn is the currently-visible page's own "Delete Selected"
-// button -- single package-level slot, same reasoning as viewRoot/toField
-// above: only one folder page is ever actually visible (and thus
-// receiving clicks) at a time.
-var deleteSelectedBtn *widgets.Button
+// folderUI holds one folder's own live widget handles and row-selection
+// state -- everything navigatePage/onRowSelect/onDeleteSelected need in
+// order to act on "whichever folder is actually on screen." Exactly one
+// *folderUI is ever active (pointed to by `active`) at a time, matching
+// this app's existing single-visible-page assumption everywhere else.
+type folderUI struct {
+	rowsContainer widgets.Container
+	olderBtn      widgets.Button
+	newerBtn      widgets.Button
+	pageLabel     widgets.Label
+	deleteBtn     widgets.Button
+
+	selectedSeqs  map[int]bool
+	rowWidgets    map[int]widgets.Container
+	rowCheckboxes map[int]widgets.Checkbox
+
+	// emptyLabel is the "No messages." placeholder navigatePage creates
+	// directly (not tracked in rowWidgets, since it isn't a
+	// widgets.Container) when a page has zero rows -- 0 means none is
+	// currently up. navigatePage destroys and clears this on every
+	// rebuild before deciding whether the new page needs one, so
+	// repeatedly landing on an empty page (e.g. Refresh clicked more than
+	// once) never leaks more than one.
+	emptyLabel widgets.Label
+}
+
+// folderUIs persists each folder's own folderUI across folder switches --
+// same lifetime as folderViews (deleted together by
+// destroyPersistedFolderView), so a folder's selection/widget-handle state
+// survives a plain "switch away and back" (folderViews' own SetVisible
+// reuse) but not a real rebuild.
+var folderUIs = map[string]*folderUI{}
+
+// active is whichever folder's folderUI is currently on screen -- nil
+// only before the very first folder is ever shown. Every row-selection
+// helper below reads/writes through this instead of a bare package-level
+// map, so it always acts on the folder actually visible right now, not
+// whichever folder happened to build (or rebuild) most recently.
+var active *folderUI
+
+// activateFolder makes folder's own folderUI (creating one the first
+// time) the active one -- called on every transition that puts a folder
+// view on screen, whether a real build or a persisted-view reuse, so
+// `active` never lags behind what's actually visible.
+func activateFolder(folder string) {
+	fu, ok := folderUIs[folder]
+	if !ok {
+		fu = &folderUI{
+			selectedSeqs:  map[int]bool{},
+			rowWidgets:    map[int]widgets.Container{},
+			rowCheckboxes: map[int]widgets.Checkbox{},
+		}
+		folderUIs[folder] = fu
+	}
+	active = fu
+}
 
 // registerRowWidget/registerRowCheckbox are called once per real
 // MessageRow build (views.go.ntx), right after creating each -- lets this
 // file act on a specific row later (checkbox toggle bookkeeping, direct
-// destroy after a batch delete) without MessageRow's own signature
-// needing to return anything beyond its already-real `error`.
-func registerRowWidget(seq int, w widgets.Container)   { rowWidgets[seq] = w }
-func registerRowCheckbox(seq int, cb widgets.Checkbox) { rowCheckboxes[seq] = cb }
+// destroy after a batch delete or a page navigation) without MessageRow's
+// own signature needing to return anything beyond its already-real
+// `error`. Always registers into whichever folder is currently active --
+// safe since a MessageRow is only ever built while its own folder is the
+// one being built/rebuilt.
+func registerRowWidget(seq int, w widgets.Container)   { active.rowWidgets[seq] = w }
+func registerRowCheckbox(seq int, cb widgets.Checkbox) { active.rowCheckboxes[seq] = cb }
 
 // onRowSelect is MessageRow's own Checkbox onClick handler.
 func onRowSelect(seq int, checked bool) error {
 	if checked {
-		selectedSeqs[seq] = true
+		active.selectedSeqs[seq] = true
 	} else {
-		delete(selectedSeqs, seq)
+		delete(active.selectedSeqs, seq)
 	}
 	updateDeleteSelectedLabel()
 	return nil
 }
 
 func updateDeleteSelectedLabel() {
-	if deleteSelectedBtn == nil {
+	if active == nil || active.deleteBtn == 0 {
 		return
 	}
-	_ = deleteSelectedBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(selectedSeqs)))
+	_ = active.deleteBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(active.selectedSeqs)))
 }
 
-// resetSelectionState clears whatever's currently selected -- called
-// whenever the currently-displayed folder page is about to stop being the
-// one actually on screen (hidden-but-kept-alive) or is being rebuilt from
-// scratch. uncheckWidgets is true only for the "hidden but still alive"
-// case -- a page about to be destroyed outright has nothing left worth
-// resetting.
+// resetSelectionState clears whatever's currently selected on the active
+// folder. uncheckWidgets is true for the "hidden but still alive" case
+// (clearView's own "folder:" branch) -- the row widgets/checkboxes
+// themselves are untouched (still real, still alive, just no longer
+// visible), only the *selection* is cleared and reflected back onto the
+// still-real checkboxes. false means a real rebuild (or navigatePage's
+// own row rebuild) is about to destroy every one of these widgets for
+// real, so the id maps themselves are cleared too -- keeping them around
+// would just be stale ids pointing at now-destroyed widgets.
 func resetSelectionState(uncheckWidgets bool) {
+	if active == nil {
+		return
+	}
 	if uncheckWidgets {
-		for _, cb := range rowCheckboxes {
+		for _, cb := range active.rowCheckboxes {
 			_ = cb.SetChecked(false)
 		}
+	} else {
+		active.rowWidgets = map[int]widgets.Container{}
+		active.rowCheckboxes = map[int]widgets.Checkbox{}
 	}
-	selectedSeqs = map[int]bool{}
-	rowWidgets = map[int]widgets.Container{}
-	rowCheckboxes = map[int]widgets.Checkbox{}
+	active.selectedSeqs = map[int]bool{}
 	updateDeleteSelectedLabel()
 }
 
@@ -330,8 +392,8 @@ func resetSelectionState(uncheckWidgets bool) {
 // still-pending lower Seq valid throughout the batch instead of racing
 // its own earlier deletions.
 func onDeleteSelected() error {
-	seqs := make([]int, 0, len(selectedSeqs))
-	for seq := range selectedSeqs {
+	seqs := make([]int, 0, len(active.selectedSeqs))
+	for seq := range active.selectedSeqs {
 		seqs = append(seqs, seq)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(seqs)))
@@ -345,16 +407,16 @@ func onDeleteSelected() error {
 			return showError(err)
 		}
 		cached.msgs = removeAndShift(cached.msgs, seq)
-		if w, ok := rowWidgets[seq]; ok {
+		if w, ok := active.rowWidgets[seq]; ok {
 			w.Destroy()
 		}
 	}
 	folderCache[key] = cached
 	invalidateOtherPages(folder, page)
 
-	selectedSeqs = map[int]bool{}
-	rowWidgets = map[int]widgets.Container{}
-	rowCheckboxes = map[int]widgets.Checkbox{}
+	active.selectedSeqs = map[int]bool{}
+	active.rowWidgets = map[int]widgets.Container{}
+	active.rowCheckboxes = map[int]widgets.Checkbox{}
 	updateDeleteSelectedLabel()
 	return nil
 }
@@ -420,6 +482,10 @@ func destroyPersistedFolderView(folder string) {
 	root.Destroy()
 	delete(folderViews, folder)
 	delete(folderViewPage, folder)
+	if fu, ok := folderUIs[folder]; ok && active == fu {
+		active = nil
+	}
+	delete(folderUIs, folder)
 	if viewRoot != nil && *viewRoot == root {
 		viewRoot = nil
 	}
@@ -430,6 +496,7 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 		// Already built, still fresh, and showing this exact page --
 		// just swap it back in.
 		clearView()
+		activateFolder(folder)
 		currentFolder = folder
 		currentView = "folder:" + folder
 		viewRoot = &root
@@ -437,7 +504,7 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 	}
 	destroyPersistedFolderView(folder)
 	clearView()
-	resetSelectionState(false)
+	activateFolder(folder)
 
 	currentFolder = folder
 	currentView = "folder:" + folder
@@ -447,23 +514,111 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 		return showError(err)
 	}
 	if err := FolderView(*contentArea, toInboxRows(data.msgs), folderDisplayName(folder), page, fmt.Sprintf("Page %d", page+1), data.canGoOlder, pageSizeLabel(),
-		func() error { return renderFolder(folder, page-1, false) },
-		func() error { return renderFolder(folder, page+1, false) },
+		func() error { return navigatePage(folder, folderPage[folder]-1) },
+		func() error { return navigatePage(folder, folderPage[folder]+1) },
 		func() error {
 			// Manual refresh -- Inbox's own cache is never auto-invalidated
 			// by a send (unlike Sent, which we know for certain gets a new
 			// entry), so this is the way to actually see new mail without
-			// restarting the app.
-			delete(folderCache, folderCacheKey{folder, page})
-			return renderFolder(folder, page, true)
+			// restarting the app. Goes through navigatePage too, same as
+			// Older/Newer, so Refresh no longer flashes the whole view --
+			// just the rows.
+			delete(folderCache, folderCacheKey{folder, folderPage[folder]})
+			return navigatePage(folder, folderPage[folder])
 		},
 		onPageSize,
 		onDeleteSelected,
+		func() error {
+			fu := folderUIs[folder]
+			fu.rowsContainer = *rowsContainer
+			fu.olderBtn = *olderBtn
+			fu.newerBtn = *newerBtn
+			fu.pageLabel = *pagerLabelWidget
+			fu.deleteBtn = *deleteSelectedBtn
+			return nil
+		},
 	); err != nil {
 		return err
 	}
 	folderViews[folder] = *viewRoot
 	folderViewPage[folder] = page
+	updateDeleteSelectedLabel()
+	return nil
+}
+
+// navigatePage swaps folder's currently-displayed page to newPage while
+// leaving the rest of its view (label, toolbar, pager buttons) alive --
+// only the message rows themselves are destroyed and rebuilt, avoiding
+// the old full-view rebuild flash on every Older/Newer/Refresh click.
+// Falls back to a real renderFolder if folder has no live view yet to
+// update in place (shouldn't happen in practice -- every caller only
+// ever reaches this through a button that's only clickable while its own
+// folder's view is already built and on screen -- but a real fallback
+// costs nothing and avoids a nil-pointer panic if that assumption is ever
+// wrong).
+func navigatePage(folder string, newPage int) error {
+	fu, ok := folderUIs[folder]
+	if !ok || fu.rowsContainer == 0 {
+		return renderFolder(folder, newPage, false)
+	}
+	active = fu
+
+	data, err := cachedListFolder(folder, newPage)
+	if err != nil {
+		return showError(err)
+	}
+
+	for _, w := range fu.rowWidgets {
+		w.Destroy()
+	}
+	fu.rowWidgets = map[int]widgets.Container{}
+	fu.rowCheckboxes = map[int]widgets.Checkbox{}
+	fu.selectedSeqs = map[int]bool{}
+	if fu.emptyLabel != 0 {
+		fu.emptyLabel.Destroy()
+		fu.emptyLabel = 0
+	}
+
+	rows := toInboxRows(data.msgs)
+	if len(rows) == 0 {
+		// Matches the bare <Label text={"No messages."} /> FolderView's
+		// own markup builds for this same case -- same hardcoded
+		// Fixed(300)/Fixed(24) a styleless <Label> tag gets from .ntx's
+		// own LayoutDefaults, so this path looks identical to a real
+		// FolderView build.
+		pid := uint32(fu.rowsContainer)
+		label, err := widgets.CreateLabel(widgets.Layout{
+			ParentID: &pid,
+			Sizing:   widgets.Sizing{Width: widgets.Fixed(300), Height: widgets.Fixed(24)},
+		}, "No messages.")
+		if err != nil {
+			return err
+		}
+		fu.emptyLabel = label
+	} else {
+		// Newest first, matching FolderView's own loop.
+		for i := len(rows) - 1; i >= 0; i-- {
+			row := rows[i]
+			seq := row.Seq
+			if err := MessageRow(uint32(fu.rowsContainer), seq, row.From, row.Subject,
+				func() error { return showMessage(seq) }, onRowSelect); err != nil {
+				return err
+			}
+		}
+	}
+
+	folderPage[folder] = newPage
+	folderViewPage[folder] = newPage
+
+	if err := fu.pageLabel.SetText(fmt.Sprintf("Page %d", newPage+1)); err != nil {
+		return err
+	}
+	if err := fu.olderBtn.SetEnabled(data.canGoOlder); err != nil {
+		return err
+	}
+	if err := fu.newerBtn.SetEnabled(newPage > 0); err != nil {
+		return err
+	}
 	updateDeleteSelectedLabel()
 	return nil
 }

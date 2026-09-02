@@ -38,22 +38,21 @@ content {
   padding: 4
 }
 
-// The purely-structural per-row wrapper MessageRow needs for its own
-// ref-scoping trick (see views.go.ntx's own doc comment on it) -- a bare
-// <Container> otherwise carries an unremovable 8px default padding on
-// every side, which was stacking with `row`'s own padding below to
-// visibly space rows much further apart than intended. Zeroing it out
-// here (real NTSS padding override, 2026-09-02) removes that with no
-// visual role of its own to lose. width: grow is real too, not
-// decorative -- a bare Container has no width default of its own at
-// all, so without this it sized to its own natural content width
-// instead of the row's real available width, leaving row's own
-// width: grow (its child, one level in) nothing real to grow into --
-// the row card's visible background ended up narrower than the text
-// actually laid out inside it.
-rowWrap {
-  padding: 0
+// FolderView's own persisted rows-only parent (2026-09-02) -- lets
+// navigatePage destroy and rebuild just the message rows on Older/Newer/
+// Refresh, leaving the folder label/toolbar/pager alive. childGap matches
+// content's own, since rows used to be content's direct children sharing
+// its childGap -- moving them one level in here keeps the same visual
+// spacing between rows as before. height: grow (not fit) so this
+// container always claims every bit of vertical space content isn't
+// using for the label/toolbar/pager, regardless of how many real rows
+// are inside it -- otherwise, with few rows, the pager would sit right
+// below them instead of pinned to the window's own bottom edge.
+rowsList {
+  direction: topToBottom
   width: grow
+  height: grow
+  childGap: 4
 }
 
 // padding trimmed from 10 -> 5 (2026-09-02), same "fit a full page on
