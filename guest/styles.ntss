@@ -111,15 +111,13 @@ secondaryBtn {
   cornerRadius: {6, 6, 6, 6}
 }
 
-// Only ever used for "Delete Selected" -- wider than a Button's own
-// hardcoded 120px default since that label is longer than any other
-// button's in this app. Real, disclosed natyv limitation: Button has no
-// font-driven text measurement at all, so a longer label needs its own
-// explicit width -- there's no "just let it grow to fit the text" option
-// today the way there is for a Container (see fitSizing's own doc
-// comment in shared's Codegen.zig).
+// Only ever used for "Delete Selected" -- width: fit sizes it to its own
+// real label text (a live count, "Delete Selected (N)") via natyv-core's
+// new real font-driven Button auto-width (2026-09-02), rather than a
+// manually-tuned fixed width that would either overflow or waste space
+// as N's digit count changes.
 dangerBtn {
   backgroundColor: "#C1443FFF"
   cornerRadius: {6, 6, 6, 6}
-  width: 190
+  width: fit
 }
