@@ -87,7 +87,7 @@ func MessageRow(parent uint32, from string, subject string, onOpen func() error,
 
 func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
     <Container ref={&viewRoot} styles={content}>
-        <Button onClick={onBack} text={"< Back"} />
+        <Button onClick={onBack}>< Back</Button>
         <Label text={from} styles={field} />
         <Label text={subject} styles={field} />
         <TextArea text={decodeMimeBody(body)} styles={bodyArea} />
