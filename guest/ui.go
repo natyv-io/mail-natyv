@@ -387,10 +387,23 @@ func resetSelectionState(uncheckWidgets bool) {
 // onDeleteSelected is the toolbar's own single "Delete Selected" button
 // handler -- deletes every currently-checked row in one batch. Processes
 // highest Seq first: deleting a message shifts every later message's real
-// sequence number down by one (EXPUNGE's own behavior, see
-// removeAndShift's own doc comment), so deleting top-down keeps every
-// still-pending lower Seq valid throughout the batch instead of racing
-// its own earlier deletions.
+// sequence number down by one (EXPUNGE's own behavior), so deleting
+// top-down keeps every still-pending lower Seq valid throughout the batch
+// instead of racing its own earlier deletions.
+//
+// Real UX fix (2026-09-03): this used to patch the current page's own
+// cached message list in place (drop the deleted entries, shift remaining
+// Seqs down) and destroy just the deleted rows' own widgets -- correct for
+// what it did, but it never backfilled the now-short page with whatever
+// used to be the *next* page's own leading message(s), leaving a
+// permanently shorter page even when older mail exists to fill it. Fixed
+// by dropping this page's own cache entry too (matching Refresh's own
+// mechanism exactly, `renderFolder`'s Refresh closure just above) and
+// calling `navigatePage` to re-fetch fresh from IMAP -- deriving the
+// page's own [from, to] range against the real, now-decremented total
+// message count naturally pulls in the right messages, and reuses the
+// same already-proven rows-only rebuild every other pager action already
+// goes through (no new "flash the whole view" risk).
 func onDeleteSelected() error {
 	seqs := make([]int, 0, len(active.selectedSeqs))
 	for seq := range active.selectedSeqs {
@@ -400,25 +413,16 @@ func onDeleteSelected() error {
 
 	folder := currentFolder
 	page := folderPage[folder]
-	key := folderCacheKey{folder, page}
-	cached := folderCache[key]
 	for _, seq := range seqs {
 		if err := deleteMessage(seq); err != nil {
 			return showError(err)
 		}
-		cached.msgs = removeAndShift(cached.msgs, seq)
-		if w, ok := active.rowWidgets[seq]; ok {
-			w.Destroy()
-		}
 	}
-	folderCache[key] = cached
+
+	delete(folderCache, folderCacheKey{folder, page})
 	invalidateOtherPages(folder, page)
 
-	active.selectedSeqs = map[int]bool{}
-	active.rowWidgets = map[int]widgets.Container{}
-	active.rowCheckboxes = map[int]widgets.Checkbox{}
-	updateDeleteSelectedLabel()
-	return nil
+	return navigatePage(folder, page)
 }
 
 // currentView identifies whatever's actually rendered under viewRoot right
@@ -637,28 +641,6 @@ func invalidateFolder(folder string) {
 	}
 	folderPage[folder] = 0
 	destroyPersistedFolderView(folder)
-}
-
-// removeAndShift drops the message whose sequence number is deletedSeq and
-// corrects every remaining message's own Seq to match what the server's
-// real post-EXPUNGE state would be -- EXPUNGE shifts every message with a
-// higher sequence number down by one, so leaving them untouched would make
-// a later action against one of them (Open, Delete) act on the wrong
-// message. Filters in place (reuses msgs' own backing array) since this
-// is always called with the caller's own already-owned cache slice, never
-// a shared one.
-func removeAndShift(msgs []imap.Message, deletedSeq int) []imap.Message {
-	updated := msgs[:0]
-	for _, msg := range msgs {
-		switch {
-		case msg.Seq == deletedSeq:
-			continue
-		case msg.Seq > deletedSeq:
-			msg.Seq--
-		}
-		updated = append(updated, msg)
-	}
-	return updated
 }
 
 // -- Read view --
