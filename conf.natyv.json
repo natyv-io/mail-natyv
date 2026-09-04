@@ -15,5 +15,6 @@
   },
   "ui": {
     "backend": "clay"
-  }
+  },
+  "build_mode": "release_small"
 }
