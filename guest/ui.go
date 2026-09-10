@@ -1,19 +1,54 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 
+	natyv "github.com/natyv-io/sdks/go"
 	"github.com/natyv-io/sdks/go/imap"
 	"github.com/natyv-io/sdks/go/widgets"
 )
+
+// appRoot is this app's own top-level Container (App's own parent,
+// created once in natyv_init) -- the stable anchor App/contentArea/every
+// dynamic view attaches under. Promoted from a
+// natyv_init-local var to package-level and persisted (via
+// persistedAppRoot, natyv_resume's Get() call restores this before
+// rebuildApp ever runs) so a resumed instance's own Go runtime (which
+// forgets every package-level value on a fresh instantiation, even though
+// the *host* never destroyed the underlying widget) can still name the
+// exact same real widget id later navigation needs. Named appRoot, not
+// root, specifically to avoid colliding with renderFolder's/
+// destroyPersistedFolderView's own pre-existing local `root` (a folder's
+// persisted view Container) -- Go would silently let a real reference
+// here resolve to the wrong one if they shared a name.
+var appRoot widgets.Container
+var persistedAppRoot = natyv.Persisted[widgets.Container]("appRoot", 0)
+
+// appRootLayout is the real Layout appRoot itself is created with (see
+// main.go's natyvInit). appRoot only ever has one direct child
+// (natyvBuildApp's own Container0), so Direction is moot today, but this
+// still mirrors appRoot's real creation Layout rather than assuming that
+// stays true forever.
+var appRootLayout = widgets.Layout{Sizing: widgets.Sizing{Width: widgets.Grow(), Height: widgets.Grow()}}
 
 // contentArea is bound by app.go.ntx's own ref={&contentArea} -- every
 // dynamic view (inbox list, message read, compose) attaches under it.
 // Pointer type: ref={&x} generates "x = &<createdVar>", so x itself must
 // already be declared *widgets.Container for that assignment to type-check.
+//
+// Persisted (2026-09-10, resume-without-recreate plan, Mechanism 1): used
+// to assume App(appRoot) (called by rebuildApp on every fresh
+// instantiation) always set this fresh as an ordinary side effect of
+// running -- no longer true now that natyv_resume reattaches handlers
+// instead of rebuilding the tree, so a resumed instance never calls App
+// at all. Batched into natyvCheckpoint/natyvResume (main.go), not set at
+// this var's own assignment site (app.natyv.go, generated, DO-NOT-EDIT).
 var contentArea *widgets.Container
+var persistedContentArea = natyv.Persisted[widgets.Container]("contentArea", 0)
+var restoredContentArea widgets.Container
 
 // viewRoot is the current dynamic view's own single root Container --
 // bound directly by each view composer's own top-level `ref={&viewRoot}`
@@ -23,23 +58,104 @@ var contentArea *widgets.Container
 // Destroying it alone cascades through everything the view created
 // (natyv-core's own destroy now cascades to every real Clay descendant),
 // so no per-widget tracking is needed.
+//
+// Persisted (2026-09-10, resume-without-recreate plan, Mechanism 1),
+// same reasoning as contentArea above -- only meaningful while
+// currentView == "compose" (the one real reader, handleComposeSend,
+// below), but batched unconditionally alongside contentArea for the same
+// reason: cheap, and simpler than conditioning the persist on
+// currentView.
 var viewRoot *widgets.Container
+var persistedViewRoot = natyv.Persisted[widgets.Container]("viewRoot", 0)
+var restoredViewRoot widgets.Container
 
 // toField/subjField/bodyField/statusLbl are bound by ComposeView's own
-// ref={&x} attributes -- its Send button's handler (also written directly
-// in views.go.ntx) reads/clears them by these same package-level names.
+// ref={&x} attributes -- handleComposeSend (below) reads/clears them by
+// these same package-level names. Persisted (Mechanism 1) the same way
+// as viewRoot immediately above.
 var toField *widgets.TextField
 var subjField *widgets.TextField
 var bodyField *widgets.TextArea
 var statusLbl *widgets.Label
+var persistedToField = natyv.Persisted[widgets.TextField]("toField", 0)
+var persistedSubjField = natyv.Persisted[widgets.TextField]("subjField", 0)
+var persistedBodyField = natyv.Persisted[widgets.TextArea]("bodyField", 0)
+var persistedStatusLbl = natyv.Persisted[widgets.Label]("statusLbl", 0)
+var restoredToField widgets.TextField
+var restoredSubjField widgets.TextField
+var restoredBodyField widgets.TextArea
+var restoredStatusLbl widgets.Label
 
+// handleComposeSend is ComposeView's own Send button handler, extracted
+// to a real named function (2026-09-10, resume-without-recreate plan,
+// step 5) so both the real .ntx build (onClick={handleComposeSend}) and
+// natyv_resume's own rebindComposeSendClick can reference the identical
+// logic -- same precedent as handleShowInbox/handleShowSent/
+// handleShowCompose, all already plain named functions for exactly this
+// reason.
+func handleComposeSend() error {
+	to, _ := toField.Text()
+	subject, _ := subjField.Text()
+	body, _ := bodyField.Text()
+
+	if err := statusLbl.SetText(""); err != nil {
+		return err
+	}
+	// Real, deliberate visual feedback during the blocking send call: this
+	// natyv_dispatch handler runs on the worker thread and blocks for the
+	// real network round trip, but widget creation itself mutates the
+	// shared registry immediately (before that blocking call runs) --
+	// SDL's own render loop, on the separate main thread, keeps drawing
+	// independently the whole time, so the spinner genuinely animates live
+	// during the send, not just at the very end.
+	spinner, serr := widgets.CreateSpinner(smallFixed(uint32(*viewRoot), 60, 16))
+	if serr != nil {
+		return serr
+	}
+	sendErr := sendMessage(to, subject, body)
+	spinner.Destroy()
+
+	if sendErr != nil {
+		return statusLbl.SetText("Error: " + sendErr.Error())
+	}
+
+	// A real send always changes Sent's own contents -- drop its cache
+	// entry (and its persisted view, if built) so the next visit rebuilds
+	// with fresh data instead of reusing a now-stale one. Inbox is left
+	// alone even though a self-send would technically affect it too:
+	// invalidating it on every send would mean paying a real refetch for
+	// the common case (sending to someone else) just to handle a rare one
+	// -- the Refresh button in the folder view is the real, explicit way
+	// to see new mail there.
+	invalidateFolder(sentFolder)
+
+	if err := toField.Clear(); err != nil {
+		return err
+	}
+	if err := subjField.Clear(); err != nil {
+		return err
+	}
+	if err := bodyField.Clear(); err != nil {
+		return err
+	}
+
+	return statusLbl.SetText("Sent!")
+}
+
+// currentFolder is the raw IMAP mailbox name currently showing -- persisted
+// via persistedCurrentFolder so a resumed instance's rebuildApp (below)
+// knows which folder to re-render, not just that some folder was open.
 var currentFolder = inboxFolder
+var persistedCurrentFolder = natyv.Persisted[string]("currentFolder", inboxFolder)
 
 // pageSize is how many messages a folder page holds -- see listFolder's
 // own doc comment for the paging scheme itself. One global setting shared
 // by every folder (not per-folder), selectable at runtime via the
-// page-size Dropdown in FolderView -- see setPageSize. Defaults to 5.
+// page-size Dropdown in FolderView -- see setPageSize. Defaults to 5;
+// persisted via persistedPageSize so a resumed instance keeps whatever
+// size the user last chose.
 var pageSize = 5
+var persistedPageSize = natyv.Persisted[int]("pageSize", 5)
 
 // pageSizeOptions/pageSizeValues are FolderView's own page-size Dropdown
 // choices -- parallel slices since Dropdown's real SDK options are always
@@ -98,6 +214,25 @@ var pagerLabelWidget *widgets.Label
 var rowWidget *widgets.Container
 var deleteSelectedBtn *widgets.Button
 
+// inboxBtn/sentBtn/composeBtn (App), refreshBtn/backBtn (FolderView/
+// MessageDetailView), sendBtn (ComposeView) -- same shared-ref-slot
+// reasoning as above, added 2026-09-10 (resume-without-recreate plan,
+// step 5) purely so RegisterBinding has a widget id to bind against right
+// after creation; none of these are read anywhere else the way
+// rowsContainer/pagerLabelWidget are.
+var inboxBtn *widgets.Button
+var sentBtn *widgets.Button
+var composeBtn *widgets.Button
+var refreshBtn *widgets.Button
+var backBtn *widgets.Button
+var sendBtn *widgets.Button
+
+// pageSizeDropdown (FolderView) -- struct-backed (*widgets.Dropdown, not
+// a bare uint32), added once widgets.WrapDropdown existed (2026-09-10,
+// same session, later) to close out the one handler kind deferred when
+// step 5 first landed.
+var pageSizeDropdown *widgets.Dropdown
+
 // setPageSize changes how many messages a folder page holds and applies
 // it immediately. Every folder's own already-cached pages and persisted
 // view were built against the *old* page size, so "page 1" under the new
@@ -121,8 +256,11 @@ func setPageSize(newSize int) error {
 
 // folderPage remembers each folder's own current page (0 = most recent),
 // across navigation -- switching back to a folder shows whatever page it
-// was last on, not always the most recent.
+// was last on, not always the most recent. Persisted via
+// persistedFolderPage so a resumed instance keeps every folder's own page
+// position, not just the one currently on screen.
 var folderPage = map[string]int{}
+var persistedFolderPage = natyv.Persisted[map[string]int]("folderPage", map[string]int{})
 
 // folderCacheKey pairs a folder with a specific page -- each page is
 // fetched and cached independently, since paging means there's no longer
@@ -256,6 +394,7 @@ func smallFixed(parent uint32, width, height float32) widgets.Layout {
 // are actually stale (Refresh, or invalidateFolder after a send), or when
 // its own page changes.
 var folderViews = map[string]widgets.Container{}
+var persistedFolderViews = natyv.Persisted[map[string]widgets.Container]("folderViews", map[string]widgets.Container{})
 
 // folderViewPage records which page each folder's own persisted view
 // (folderViews) actually shows -- only ever one page kept alive per
@@ -263,6 +402,7 @@ var folderViews = map[string]widgets.Container{}
 // existing memory-efficiency discipline. Paging within a folder always
 // rebuilds, the same as Refresh.
 var folderViewPage = map[string]int{}
+var persistedFolderViewPage = natyv.Persisted[map[string]int]("folderViewPage", map[string]int{})
 
 // -- Row selection (checkbox + batch delete) --
 //
@@ -298,6 +438,56 @@ type folderUI struct {
 	// once) never leaks more than one.
 	emptyLabel widgets.Label
 }
+
+// folderUISnapshot mirrors folderUI's own widget-id fields only (not
+// selection state -- see persistedFolderUIWidgets' own doc comment for
+// why) -- folderUI's fields are unexported, so it can't be persisted
+// directly (encoding/json silently drops unexported fields with no
+// error).
+//
+// Real, load-bearing correction (found live): RowWidgets/RowCheckboxes
+// are included here, NOT just the toolbar/container ids -- an earlier
+// version of this fix left them out, reasoning they were pure selection
+// bookkeeping that's fine to lose across a recycle. That was wrong:
+// navigatePage's own row-rebuild (the common case once rowsContainer is
+// already known, see its own `fu.rowsContainer == 0` fallback check)
+// destroys the *previous* page's rows by iterating fu.rowWidgets, not by
+// asking the host what rowsContainer's current children are -- with an
+// empty, unrestored map, that destroy loop silently no-ops, and newly
+// built rows just accumulate as extra siblings under the same
+// rowsContainer instead of replacing anything (confirmed live: paging
+// forward twice left both old pages' rows visibly stacked together).
+// SelectedSeqs itself is still excluded -- losing an in-progress
+// selection across a recycle is a real, accepted (non-destructive) gap,
+// unlike losing the destroy-registry.
+// RowWidgets/RowCheckboxes are string-keyed (the real seq, via
+// strconv.Itoa -- see main.go's checkpoint/resume conversion), not
+// map[int]... like folderUI's own live fields -- persistjson (the SDK's
+// safe-marshal wrapper every Persisted[T] value goes through) only
+// supports string-keyed maps, confirmed live ("unsupported value: map key
+// type int").
+type folderUISnapshot struct {
+	RowsContainer widgets.Container            `json:"rows_container"`
+	OlderBtn      widgets.Button               `json:"older_btn"`
+	NewerBtn      widgets.Button               `json:"newer_btn"`
+	PageLabel     widgets.Label                `json:"page_label"`
+	DeleteBtn     widgets.Button               `json:"delete_btn"`
+	EmptyLabel    widgets.Label                `json:"empty_label"`
+	RowWidgets    map[string]widgets.Container `json:"row_widgets"`
+	RowCheckboxes map[string]widgets.Checkbox  `json:"row_checkboxes"`
+}
+
+// persistedFolderUIWidgets persists the widget-id half of each folder's
+// folderUI (2026-09-10, resume-without-recreate plan, Mechanism 1) --
+// see folderUISnapshot's own doc comment for exactly what's included and
+// why. Without the toolbar widget ids specifically, updateDeleteSelectedLabel
+// silently can't update the Delete Selected button's own label at all (it
+// no-ops on deleteBtn == 0) until an unrelated real rebuild happens to
+// populate it as a side effect -- not a crash, but a real, avoidable gap
+// this closes. Without RowWidgets/RowCheckboxes, navigatePage's own row
+// destroy step silently no-ops -- see this type's own doc comment for the
+// real, live-found bug this caused.
+var persistedFolderUIWidgets = natyv.Persisted[map[string]folderUISnapshot]("folderUIWidgets", map[string]folderUISnapshot{})
 
 // folderUIs persists each folder's own folderUI across folder switches --
 // same lifetime as folderViews (deleted together by
@@ -338,8 +528,74 @@ func activateFolder(folder string) {
 // `error`. Always registers into whichever folder is currently active --
 // safe since a MessageRow is only ever built while its own folder is the
 // one being built/rebuilt.
-func registerRowWidget(seq int, w widgets.Container)   { active.rowWidgets[seq] = w }
-func registerRowCheckbox(seq int, cb widgets.Checkbox) { active.rowCheckboxes[seq] = cb }
+//
+// Also record a binding (natyv.RegisterBinding) alongside the real
+// bookkeeping -- see rowOpenArgs/rebindRowOpen and rebindRowCheckboxToggle
+// below for what reattaches on resume. currentFolder is read here, not
+// threaded as a param: both real callers (FolderView's own initial-rows
+// loop, navigatePage's rows-only rebuild) only ever build a row for
+// whichever folder is currently being (re)built -- the same implicit
+// invariant onRowSelect/active already rely on.
+func registerRowWidget(seq int, w widgets.Container) {
+    active.rowWidgets[seq] = w
+    _ = natyv.RegisterBinding(uint32(w), "row_open", rowArgs{Seq: seq, Folder: currentFolder})
+}
+func registerRowCheckbox(seq int, cb widgets.Checkbox) {
+    active.rowCheckboxes[seq] = cb
+    _ = natyv.RegisterBinding(uint32(cb), "row_checkbox_toggle", rowArgs{Seq: seq, Folder: currentFolder})
+}
+
+// rowArgs is the persisted-args shape for both row_open and
+// row_checkbox_toggle bindings. Folder is carried explicitly and
+// validated at rebind-call time (see rebindRowOpen/
+// rebindRowCheckboxToggle below), not just recorded -- Seq is only
+// unique within one mailbox, and the implicit "hidden folder views are
+// unclickable" safety net the real, ordinary build path relies on was
+// never written to survive this reattachment path. A stale binding
+// firing against the wrong now-current folder would mean acting on the
+// wrong message (e.g. deleting the wrong email), not a cosmetic glitch.
+type rowArgs struct {
+    Seq    int    `json:"seq"`
+    Folder string `json:"folder"`
+}
+
+func rebindRowOpen(widgetID uint32, args json.RawMessage) error {
+    var a rowArgs
+    if err := json.Unmarshal(args, &a); err != nil {
+        return err
+    }
+    widgets.WrapContainer(widgetID).OnClick(func() error {
+        if a.Folder != currentFolder {
+            return nil
+        }
+        return showMessage(a.Seq)
+    })
+    return nil
+}
+
+func rebindRowCheckboxToggle(widgetID uint32, args json.RawMessage) error {
+    var a rowArgs
+    if err := json.Unmarshal(args, &a); err != nil {
+        return err
+    }
+    checkbox := widgets.WrapCheckbox(widgetID)
+    checkbox.OnClick(func() error {
+        if a.Folder != currentFolder {
+            return nil
+        }
+        checked, err := checkbox.Checked()
+        if err != nil {
+            return err
+        }
+        return onRowSelect(a.Seq, checked)
+    })
+    return nil
+}
+
+func init() {
+    natyv.RegisterHandlerFunc("row_open", rebindRowOpen)
+    natyv.RegisterHandlerFunc("row_checkbox_toggle", rebindRowCheckboxToggle)
+}
 
 // onRowSelect is MessageRow's own Checkbox onClick handler.
 func onRowSelect(seq int, checked bool) error {
@@ -425,6 +681,118 @@ func onDeleteSelected() error {
 	return navigatePage(folder, page)
 }
 
+// pagerArgs is the persisted-args shape for the pager_nav binding (Older
+// and Newer both share it, distinguished by Delta -- Older is +1, Newer
+// is -1, confirmed against the real closures FolderView's own onOlder/
+// onNewer params are built from). Folder, same reasoning as rowArgs
+// above, is validated at rebind-call time, not just recorded.
+type pagerArgs struct {
+	Folder string `json:"folder"`
+	Delta  int    `json:"delta"`
+}
+
+func rebindPagerNav(widgetID uint32, args json.RawMessage) error {
+	var a pagerArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return err
+	}
+	widgets.WrapButton(widgetID).OnClick(func() error {
+		if a.Folder != currentFolder {
+			return nil
+		}
+		return navigatePage(a.Folder, folderPage[a.Folder]+a.Delta)
+	})
+	return nil
+}
+
+// rebindDeleteSelectedClick takes no args -- onDeleteSelected itself
+// captures nothing, reading active/currentFolder/folderPage as live
+// globals, same as the real, ordinary build path already does.
+func rebindDeleteSelectedClick(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(onDeleteSelected)
+	return nil
+}
+
+// refreshArgs is refresh_click's own persisted-args shape -- Refresh's
+// real closure (renderFolder's call site) closes over `folder string`
+// only, same as pagerArgs above but without a Delta.
+type refreshArgs struct {
+	Folder string `json:"folder"`
+}
+
+func rebindRefreshClick(widgetID uint32, args json.RawMessage) error {
+	var a refreshArgs
+	if err := json.Unmarshal(args, &a); err != nil {
+		return err
+	}
+	widgets.WrapButton(widgetID).OnClick(func() error {
+		if a.Folder != currentFolder {
+			return nil
+		}
+		delete(folderCache, folderCacheKey{a.Folder, folderPage[a.Folder]})
+		return navigatePage(a.Folder, folderPage[a.Folder])
+	})
+	return nil
+}
+
+// rebindNavInbox/rebindNavSent/rebindNavCompose all take no args -- the
+// real handlers (handleShowInbox/handleShowSent/handleShowCompose) are
+// already plain named functions with zero captured state, so reattaching
+// is just re-registering the same function value directly, no closure
+// reconstruction needed.
+func rebindNavInbox(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(handleShowInbox)
+	return nil
+}
+func rebindNavSent(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(handleShowSent)
+	return nil
+}
+func rebindNavCompose(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(handleShowCompose)
+	return nil
+}
+
+// rebindBackClick takes no args -- the real onBack closure
+// (MessageDetailView's own call site) captures nothing, reading
+// currentFolder live.
+func rebindBackClick(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(func() error { return showFolder(currentFolder) })
+	return nil
+}
+
+// rebindComposeSendClick takes no args -- handleComposeSend (ui.go, below)
+// is a real named function extracted from what used to be ComposeView's
+// own inline onClick closure specifically so both the real .ntx build and
+// this rebind path can reference the identical logic, matching
+// handleShowInbox/handleShowSent/handleShowCompose's own precedent.
+func rebindComposeSendClick(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapButton(widgetID).OnClick(handleComposeSend)
+	return nil
+}
+
+// rebindPageSizeChange takes no args -- onPageSize captures nothing,
+// reading pageSizeValues as a live global. widgets.WrapDropdown needs the
+// same options list CreateDropdown (called inside FolderView's own
+// generated code) was originally given -- pageSizeOptions itself, not a
+// copy, since it's a fixed package-level var never mutated after init.
+func rebindPageSizeChange(widgetID uint32, args json.RawMessage) error {
+	widgets.WrapDropdown(widgetID, pageSizeOptions).OnSelect(onPageSize)
+	return nil
+}
+
+func init() {
+	natyv.RegisterHandlerFunc("pager_nav", rebindPagerNav)
+	natyv.RegisterHandlerFunc("delete_selected_click", rebindDeleteSelectedClick)
+	natyv.RegisterHandlerFunc("refresh_click", rebindRefreshClick)
+	natyv.RegisterHandlerFunc("page_size_change", rebindPageSizeChange)
+	natyv.RegisterHandlerFunc("nav_inbox", rebindNavInbox)
+	natyv.RegisterHandlerFunc("nav_sent", rebindNavSent)
+	natyv.RegisterHandlerFunc("nav_compose", rebindNavCompose)
+	natyv.RegisterHandlerFunc("back_click", rebindBackClick)
+	natyv.RegisterHandlerFunc("compose_send_click", rebindComposeSendClick)
+}
+
 // currentView identifies whatever's actually rendered under viewRoot right
 // now (e.g. "folder:INBOX", "message", "compose", "error") -- lets
 // showFolder tell "already showing this" apart from "showing something
@@ -432,8 +800,22 @@ func onDeleteSelected() error {
 // (hide, don't destroy) apart from every other view (destroy as before).
 // Every view-showing function below sets this itself, right alongside its
 // own clearView() call, so it's never left stale by a transition this
-// file doesn't know about.
+// file doesn't know about. Also what rebuildApp (below) switches on to
+// decide which content to reconstruct after a recycle -- persisted via
+// persistedCurrentView so that decision survives one.
 var currentView string
+var persistedCurrentView = natyv.Persisted[string]("currentView", "")
+
+// currentMessageSeq is whichever message's Seq is currently open in the
+// read view -- only meaningful while currentView == "message". Set by
+// showMessage alongside currentView itself; read by rebuildApp to
+// re-fetch and re-show the same message after a recycle (readMessageBody
+// re-selects currentFolder and re-fetches for real -- the same
+// reconnect-and-redo pattern the phase2 spike already established for its
+// own TCP connection, not a new idea). Persisted via
+// persistedCurrentMessageSeq.
+var currentMessageSeq int
+var persistedCurrentMessageSeq = natyv.Persisted[int]("currentMessageSeq", 0)
 
 // clearView retires the current view so a new one can take its place --
 // cascades a real Destroy through every widget the view created, *unless*
@@ -457,6 +839,69 @@ func showError(err error) error {
 	clearView()
 	currentView = "error"
 	return ErrorView(*contentArea, "Error: "+err.Error())
+}
+
+// rebuildApp is this app's one whole-app region, rooted at appRoot: it
+// recreates the toolbar + (empty) contentArea via App(parent), makes sure
+// there's a live IMAP connection (connectIMAP is otherwise only ever
+// called once, from natyv_init, and a resumed instance's own imapClient
+// is nil -- the host force-closes every TCP connection on a recycle, the
+// same contract the phase2 spike's own TCP connection already has), then
+// re-renders whichever content currentView says was actually on screen.
+// Called once from natyv_init (first boot, where currentView is still its
+// Go zero value "") and once per resume, via the rebuild closure
+// registered in init() below (natyv_resume's own hand-written code, see
+// main.go, has already restored currentView/currentFolder/
+// currentMessageSeq/pageSize/folderPage/appRoot from their Persisted[T]
+// handles by the time this runs).
+//
+// Deliberately does NOT itself call SetActiveRegion -- whichever content
+// function it delegates to (renderFolder/showMessage/showCompose) already
+// does that at its own end, the same call every *normal* in-app
+// navigation through that function also makes, so there's exactly one
+// place per content kind that keeps the region's own recipe current,
+// not two.
+func rebuildApp(parent widgets.Container) error {
+	if err := App(parent); err != nil {
+		return err
+	}
+	// inboxBtn/sentBtn/composeBtn (package-level ref vars, set by App's own
+	// ref={&x} attributes) are only ever built once, here -- App itself
+	// never runs again for the life of an instance (rebuildApp only calls
+	// it from natyv_init; a resumed instance reattaches instead, see
+	// main.go's natyv_resume). Registered here rather than inside App's
+	// own <%%> body since .ntx composer bodies land in the generated
+	// file, whose auto-import only detects `widgets.` usage, not `natyv.`.
+	_ = natyv.RegisterBinding(uint32(*inboxBtn), "nav_inbox", nil)
+	_ = natyv.RegisterBinding(uint32(*sentBtn), "nav_sent", nil)
+	_ = natyv.RegisterBinding(uint32(*composeBtn), "nav_compose", nil)
+	if err := connectIMAP(); err != nil {
+		return err
+	}
+	switch {
+	case strings.HasPrefix(currentView, "folder:"):
+		return renderFolder(currentFolder, folderPage[currentFolder], true)
+	case currentView == "message":
+		// headerFor reads currentFolder's cached page to show the real
+		// From/Subject alongside the body -- folderCache is deliberately
+		// never persisted (it's a pure IMAP cache, safe to just refill on
+		// demand), so warm it first or headerFor would come back empty
+		// right after a resume even though the body itself fetches fine.
+		if _, err := cachedListFolder(currentFolder, folderPage[currentFolder]); err != nil {
+			return showError(err)
+		}
+		return showMessage(currentMessageSeq)
+	case currentView == "compose":
+		return showCompose()
+	default:
+		return handleShowInbox()
+	}
+}
+
+func init() {
+	natyv.RegisterRebuildFunc("rebuildApp", func(parent widgets.Container, args json.RawMessage) error {
+		return rebuildApp(parent)
+	})
 }
 
 // -- Inbox / Sent list view --
@@ -498,13 +943,25 @@ func destroyPersistedFolderView(folder string) {
 func renderFolder(folder string, page int, forceRebuild bool) error {
 	if root, ok := folderViews[folder]; ok && !forceRebuild && folderViewPage[folder] == page {
 		// Already built, still fresh, and showing this exact page --
-		// just swap it back in.
+		// just swap it back in. No widgets were rebuilt, but currentView/
+		// currentFolder DID change (e.g. switching back from Sent) --
+		// still update the region's own recipe, or a recycle landing
+		// right after this switch would incorrectly resume whatever was
+		// showing *before* it instead of this folder.
 		clearView()
 		activateFolder(folder)
 		currentFolder = folder
 		currentView = "folder:" + folder
 		viewRoot = &root
-		return root.SetVisible(true)
+		if err := root.SetVisible(true); err != nil {
+			return err
+		}
+		// SetActiveRegion is no longer called here (2026-09-10,
+	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
+	// regionRegistry's stored recipes anymore now that natyv_checkpoint
+	// calls SnapshotBindings instead of SnapshotRegions, so this would
+	// just be building up dead state on every real navigation.
+	return nil
 	}
 	destroyPersistedFolderView(folder)
 	clearView()
@@ -539,6 +996,19 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 			fu.newerBtn = *newerBtn
 			fu.pageLabel = *pagerLabelWidget
 			fu.deleteBtn = *deleteSelectedBtn
+			_ = natyv.RegisterBinding(uint32(fu.olderBtn), "pager_nav", pagerArgs{Folder: folder, Delta: 1})
+			_ = natyv.RegisterBinding(uint32(fu.newerBtn), "pager_nav", pagerArgs{Folder: folder, Delta: -1})
+			_ = natyv.RegisterBinding(uint32(fu.deleteBtn), "delete_selected_click", nil)
+			// refreshBtn (package-level ref var, set by FolderView's own
+			// ref={&refreshBtn}) needs `folder` from this closure's own
+			// scope, which FolderView itself never receives as a param --
+			// registered here rather than inside FolderView's own <%%>
+			// body for that reason, same as the three bindings above it.
+			_ = natyv.RegisterBinding(uint32(*refreshBtn), "refresh_click", refreshArgs{Folder: folder})
+			// pageSizeDropdown.ID() is its own trigger's widget id (see
+			// Dropdown.ID's own doc comment) -- onPageSize captures
+			// nothing, same nil-args shape as delete_selected_click.
+			_ = natyv.RegisterBinding(pageSizeDropdown.ID(), "page_size_change", nil)
 			return nil
 		},
 	); err != nil {
@@ -547,6 +1017,11 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 	folderViews[folder] = *viewRoot
 	folderViewPage[folder] = page
 	updateDeleteSelectedLabel()
+	// SetActiveRegion is no longer called here (2026-09-10,
+	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
+	// regionRegistry's stored recipes anymore now that natyv_checkpoint
+	// calls SnapshotBindings instead of SnapshotRegions, so this would
+	// just be building up dead state on every real navigation.
 	return nil
 }
 
@@ -669,7 +1144,20 @@ func showMessage(seq int) error {
 	from, subject := headerFor(seq)
 	clearView()
 	currentView = "message"
-	return MessageDetailView(*contentArea, truncateWithEllipsis(from, 100), truncateWithEllipsis(subject, 100), body, func() error { return showFolder(currentFolder) })
+	currentMessageSeq = seq
+	if err := MessageDetailView(*contentArea, truncateWithEllipsis(from, 100), truncateWithEllipsis(subject, 100), body, func() error { return showFolder(currentFolder) }); err != nil {
+		return err
+	}
+	// backBtn (package-level ref var, set by MessageDetailView's own
+	// ref={&backBtn}) -- see rebuildApp's own comment on why this is
+	// registered here rather than inside the .ntx composer's own body.
+	_ = natyv.RegisterBinding(uint32(*backBtn), "back_click", nil)
+	// SetActiveRegion is no longer called here (2026-09-10,
+	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
+	// regionRegistry's stored recipes anymore now that natyv_checkpoint
+	// calls SnapshotBindings instead of SnapshotRegions, so this would
+	// just be building up dead state on every real navigation.
+	return nil
 }
 
 // -- Compose view --
@@ -677,7 +1165,19 @@ func showMessage(seq int) error {
 func showCompose() error {
 	clearView()
 	currentView = "compose"
-	return ComposeView(*contentArea)
+	if err := ComposeView(*contentArea); err != nil {
+		return err
+	}
+	// sendBtn (package-level ref var, set by ComposeView's own
+	// ref={&sendBtn}) -- see rebuildApp's own comment on why this is
+	// registered here rather than inside the .ntx composer's own body.
+	_ = natyv.RegisterBinding(uint32(*sendBtn), "compose_send_click", nil)
+	// SetActiveRegion is no longer called here (2026-09-10,
+	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
+	// regionRegistry's stored recipes anymore now that natyv_checkpoint
+	// calls SnapshotBindings instead of SnapshotRegions, so this would
+	// just be building up dead state on every real navigation.
+	return nil
 }
 
 // -- Toolbar handlers, referenced by app.go.ntx's onClick={...} bindings --

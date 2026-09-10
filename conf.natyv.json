@@ -16,5 +16,8 @@
   "ui": {
     "backend": "clay"
   },
+  "memory": {
+    "recycle_threshold_mb": 105
+  },
   "build_mode": "release_small"
 }

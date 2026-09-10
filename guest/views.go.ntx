@@ -26,9 +26,9 @@ func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, p
     <Container ref={&viewRoot} styles={content}>
         <Label text={folderLabel} styles={field} />
         <Container styles={btnRow}>
-            <Button styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
+            <Button ref={&refreshBtn} styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
             <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected}>Delete Selected</Button>
-            <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
+            <Dropdown ref={&pageSizeDropdown} text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
         </Container>
         <Container ref={&rowsContainer} styles={rowsList}>
             <%
@@ -109,7 +109,7 @@ func MessageRow(parent uint32, seq int, from string, subject string, onOpen func
 
 func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
     <Container ref={&viewRoot} styles={content}>
-        <Button styles={secondaryBtn} onClick={onBack}>< Back</Button>
+        <Button ref={&backBtn} styles={secondaryBtn} onClick={onBack}>< Back</Button>
         <Label text={from} styles={field} />
         <Label text={subject} styles={field} />
         <TextArea text={decodeMimeBody(body)} styles={bodyArea} />
@@ -122,55 +122,6 @@ func ComposeView(parent widgets.Container) error {
         <TextField ref={&subjField} styles={field} placeholder="Subject" />
         <TextArea ref={&bodyField} styles={field}>Body</TextArea>
         <Label ref={&statusLbl} />
-        <Button styles={primaryBtn} onClick={func() error {
-            to, _ := toField.Text()
-            subject, _ := subjField.Text()
-            body, _ := bodyField.Text()
-
-            if err := statusLbl.SetText(""); err != nil {
-                return err
-            }
-            // Real, deliberate visual feedback during the blocking send
-            // call: this natyv_dispatch handler runs on the worker
-            // thread and blocks for the real network round trip, but
-            // widget creation itself mutates the shared registry
-            // immediately (before that blocking call runs) -- SDL's own
-            // render loop, on the separate main thread, keeps drawing
-            // independently the whole time, so the spinner genuinely
-            // animates live during the send, not just at the very end.
-            spinner, serr := widgets.CreateSpinner(smallFixed(uint32(*viewRoot), 60, 16))
-            if serr != nil {
-                return serr
-            }
-            sendErr := sendMessage(to, subject, body)
-            spinner.Destroy()
-
-            if sendErr != nil {
-                return statusLbl.SetText("Error: " + sendErr.Error())
-            }
-
-            // A real send always changes Sent's own contents -- drop its
-            // cache entry (and its persisted view, if built) so the next
-            // visit rebuilds with fresh data instead of reusing a
-            // now-stale one. Inbox is left alone even though a self-send
-            // would technically affect it too: invalidating it on every
-            // send would mean paying a real refetch for the common case
-            // (sending to someone else) just to handle a rare one -- the
-            // Refresh button in the folder view is the real, explicit
-            // way to see new mail there.
-            invalidateFolder(sentFolder)
-
-            if err := toField.Clear(); err != nil {
-                return err
-            }
-            if err := subjField.Clear(); err != nil {
-                return err
-            }
-            if err := bodyField.Clear(); err != nil {
-                return err
-            }
-
-            return statusLbl.SetText("Sent!")
-        }}>Send</Button>
+        <Button ref={&sendBtn} styles={primaryBtn} onClick={handleComposeSend}>Send</Button>
     </Container>
 }
