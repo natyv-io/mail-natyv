@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 
 	natyv "github.com/natyv-io/sdks/go"
@@ -274,11 +273,14 @@ func cachedListFolder(folder string, page int) (folderPageData, error) {
 }
 
 // invalidateOtherPages drops every OTHER cached page of folder besides
-// keepPage -- deleting a message on keepPage shifts every later message's
-// real sequence number down by one (EXPUNGE's own behavior), which would
-// silently desync any other already-cached page's Seq values otherwise.
-// Simplest correct fix: forget them, so the next visit to one re-fetches
-// for real instead of acting on stale sequence numbers.
+// keepPage -- a different concern from the Seq/UID identity fix elsewhere
+// in this file: deleting a message on keepPage shifts every later
+// message's real sequence number down by one (EXPUNGE's own behavior), so
+// any other already-cached page's own *contents* (which messages actually
+// sit at that page's position now) go stale too, regardless of whether
+// individual rows key off Seq or UID. Simplest correct fix: forget them,
+// so the next visit to one re-fetches for real instead of showing whatever
+// used to be at that position.
 func invalidateOtherPages(folder string, keepPage int) {
 	for key := range folderCache {
 		if key.folder == folder && key.page != keepPage {
@@ -301,7 +303,7 @@ func invalidateOtherPages(folder string, keepPage int) {
 type inboxRow struct {
 	From    string
 	Subject string
-	Seq     int
+	UID     int
 }
 
 // truncateWithEllipsis clips s to at most maxRunes runes (never splitting a
@@ -339,7 +341,7 @@ func toInboxRows(msgs []imap.Message) []inboxRow {
 		// spot rather than fixing it.
 		from = truncateWithEllipsis(from, 24)
 		subject := truncateWithEllipsis(msg.Subject+"  ("+msg.Date+")", 26)
-		rows[i] = inboxRow{From: from, Subject: subject, Seq: msg.Seq}
+		rows[i] = inboxRow{From: from, Subject: subject, UID: msg.UID}
 	}
 	return rows
 }
@@ -380,9 +382,9 @@ var persistedFolderViewPage = natyv.Persisted[map[string]int]("folderViewPage", 
 //
 // Real, deliberate v1 scope: selection only ever exists for whichever
 // folder page is *currently on screen*, kept inside that folder's own
-// *folderUI rather than a shared package-level map -- Seq numbers are
-// only unique *within* one mailbox, so a bare int-keyed map shared across
-// folders would collide (Inbox's seq 3 and Sent's seq 3 are unrelated
+// *folderUI rather than a shared package-level map -- UIDs are only
+// unique *within* one mailbox, so a bare int-keyed map shared across
+// folders would collide (Inbox's UID 3 and Sent's UID 3 are unrelated
 // messages).
 
 // folderUI holds one folder's own live widget handles and row-selection
@@ -397,7 +399,7 @@ type folderUI struct {
 	pageLabel     widgets.Label
 	deleteBtn     widgets.Button
 
-	selectedSeqs  map[int]bool
+	selectedUIDs  map[int]bool
 	rowWidgets    map[int]widgets.Container
 	rowCheckboxes map[int]widgets.Checkbox
 
@@ -429,10 +431,10 @@ type folderUI struct {
 // built rows just accumulate as extra siblings under the same
 // rowsContainer instead of replacing anything (confirmed live: paging
 // forward twice left both old pages' rows visibly stacked together).
-// SelectedSeqs itself is still excluded -- losing an in-progress
+// SelectedUIDs itself is still excluded -- losing an in-progress
 // selection across a recycle is a real, accepted (non-destructive) gap,
 // unlike losing the destroy-registry.
-// RowWidgets/RowCheckboxes are string-keyed (the real seq, via
+// RowWidgets/RowCheckboxes are string-keyed (the real UID, via
 // strconv.Itoa -- see main.go's checkpoint/resume conversion), not
 // map[int]... like folderUI's own live fields -- persistjson (the SDK's
 // safe-marshal wrapper every Persisted[T] value goes through) only
@@ -483,7 +485,7 @@ func activateFolder(folder string) {
 	fu, ok := folderUIs[folder]
 	if !ok {
 		fu = &folderUI{
-			selectedSeqs:  map[int]bool{},
+			selectedUIDs:  map[int]bool{},
 			rowWidgets:    map[int]widgets.Container{},
 			rowCheckboxes: map[int]widgets.Checkbox{},
 		}
@@ -508,24 +510,30 @@ func activateFolder(folder string) {
 // rebindRowOpen/rebindRowCheckboxToggle below are unchanged -- still
 // hand-written, since the real handlers are closures the safe-auto
 // classifier correctly never attempts to resplice.
-func registerRowWidget(seq int, w widgets.Container) {
-    active.rowWidgets[seq] = w
+func registerRowWidget(uid int, w widgets.Container) {
+    active.rowWidgets[uid] = w
 }
-func registerRowCheckbox(seq int, cb widgets.Checkbox) {
-    active.rowCheckboxes[seq] = cb
+func registerRowCheckbox(uid int, cb widgets.Checkbox) {
+    active.rowCheckboxes[uid] = cb
 }
 
 // rowArgs is the persisted-args shape for both row_open and
 // row_checkbox_toggle bindings. Folder is carried explicitly and
 // validated at rebind-call time (see rebindRowOpen/
-// rebindRowCheckboxToggle below), not just recorded -- Seq is only
+// rebindRowCheckboxToggle below), not just recorded -- UID is only
 // unique within one mailbox, and the implicit "hidden folder views are
 // unclickable" safety net the real, ordinary build path relies on was
 // never written to survive this reattachment path. A stale binding
 // firing against the wrong now-current folder would mean acting on the
 // wrong message (e.g. deleting the wrong email), not a cosmetic glitch.
+//
+// UID, not Seq (2026-09-11 fix): a Seq baked in at list time can point at
+// a completely different message by the time this binding actually fires
+// (new mail arriving shifts the mailbox's own numbering) -- see
+// imap.Message's own doc comment for the real bug this closes. UID stays
+// valid regardless of what else happens to the mailbox in between.
 type rowArgs struct {
-    Seq    int    `json:"seq"`
+    UID    int    `json:"uid"`
     Folder string `json:"folder"`
 }
 
@@ -538,7 +546,7 @@ func rebindRowOpen(widgetID uint32, args json.RawMessage) error {
         if a.Folder != currentFolder {
             return nil
         }
-        return showMessage(a.Seq)
+        return showMessage(a.UID)
     })
     return nil
 }
@@ -557,7 +565,7 @@ func rebindRowCheckboxToggle(widgetID uint32, args json.RawMessage) error {
         if err != nil {
             return err
         }
-        return onRowSelect(a.Seq, checked)
+        return onRowSelect(a.UID, checked)
     })
     return nil
 }
@@ -568,11 +576,11 @@ func init() {
 }
 
 // onRowSelect is MessageRow's own Checkbox onClick handler.
-func onRowSelect(seq int, checked bool) error {
+func onRowSelect(uid int, checked bool) error {
 	if checked {
-		active.selectedSeqs[seq] = true
+		active.selectedUIDs[uid] = true
 	} else {
-		delete(active.selectedSeqs, seq)
+		delete(active.selectedUIDs, uid)
 	}
 	updateDeleteSelectedLabel()
 	return nil
@@ -582,7 +590,7 @@ func updateDeleteSelectedLabel() {
 	if active == nil || active.deleteBtn == 0 {
 		return
 	}
-	_ = active.deleteBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(active.selectedSeqs)))
+	_ = active.deleteBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(active.selectedUIDs)))
 }
 
 // resetSelectionState clears whatever's currently selected on the active
@@ -606,16 +614,21 @@ func resetSelectionState(uncheckWidgets bool) {
 		active.rowWidgets = map[int]widgets.Container{}
 		active.rowCheckboxes = map[int]widgets.Checkbox{}
 	}
-	active.selectedSeqs = map[int]bool{}
+	active.selectedUIDs = map[int]bool{}
 	updateDeleteSelectedLabel()
 }
 
 // onDeleteSelected is the toolbar's own single "Delete Selected" button
-// handler -- deletes every currently-checked row in one batch. Processes
-// highest Seq first: deleting a message shifts every later message's real
-// sequence number down by one (EXPUNGE's own behavior), so deleting
-// top-down keeps every still-pending lower Seq valid throughout the batch
-// instead of racing its own earlier deletions.
+// handler -- deletes every currently-checked row in one batch.
+//
+// UID, not Seq, and no ordering trick needed anymore (2026-09-11 fix): the
+// original version deleted highest-Seq-first, since deleting a message
+// shifts every later message's real sequence number down by one (EXPUNGE's
+// own behavior) -- processing top-down kept every still-pending lower Seq
+// valid throughout the batch instead of racing its own earlier deletions.
+// UIDs don't have this problem at all -- they're stable identities, never
+// renumbered by an EXPUNGE -- so deleteMessage(uid) stays correct
+// regardless of order; the sort this used to need is gone.
 //
 // Real UX fix (2026-09-03): this used to patch the current page's own
 // cached message list in place (drop the deleted entries, shift remaining
@@ -631,16 +644,15 @@ func resetSelectionState(uncheckWidgets bool) {
 // same already-proven rows-only rebuild every other pager action already
 // goes through (no new "flash the whole view" risk).
 func onDeleteSelected() error {
-	seqs := make([]int, 0, len(active.selectedSeqs))
-	for seq := range active.selectedSeqs {
-		seqs = append(seqs, seq)
+	uids := make([]int, 0, len(active.selectedUIDs))
+	for uid := range active.selectedUIDs {
+		uids = append(uids, uid)
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(seqs)))
 
 	folder := currentFolder
 	page := folderPage[folder]
-	for _, seq := range seqs {
-		if err := deleteMessage(seq); err != nil {
+	for _, uid := range uids {
+		if err := deleteMessage(uid); err != nil {
 			return showError(err)
 		}
 	}
@@ -759,16 +771,18 @@ func init() {
 var currentView string
 var persistedCurrentView = natyv.Persisted[string]("currentView", "")
 
-// currentMessageSeq is whichever message's Seq is currently open in the
-// read view -- only meaningful while currentView == "message". Set by
-// showMessage alongside currentView itself; read by rebuildApp to
-// re-fetch and re-show the same message after a recycle (readMessageBody
-// re-selects currentFolder and re-fetches for real -- the same
-// reconnect-and-redo pattern the phase2 spike already established for its
-// own TCP connection, not a new idea). Persisted via
-// persistedCurrentMessageSeq.
-var currentMessageSeq int
-var persistedCurrentMessageSeq = natyv.Persisted[int]("currentMessageSeq", 0)
+// currentMessageUID is whichever message's UID is currently open in the
+// read view -- only meaningful while currentView == "message". UID, not
+// Seq (2026-09-11 fix, see imap.Message's own doc comment): re-fetching by
+// a remembered Seq after a resume could silently fetch a different message
+// if the mailbox changed in between; UID stays valid. Set by showMessage
+// alongside currentView itself; read by rebuildApp to re-fetch and
+// re-show the same message after a recycle (readMessageBody re-selects
+// currentFolder and re-fetches for real -- the same reconnect-and-redo
+// pattern the phase2 spike already established for its own TCP
+// connection, not a new idea). Persisted via persistedCurrentMessageUID.
+var currentMessageUID int
+var persistedCurrentMessageUID = natyv.Persisted[int]("currentMessageUID", 0)
 
 // clearView retires the current view so a new one can take its place --
 // cascades a real Destroy through every widget the view created, *unless*
@@ -780,6 +794,16 @@ func clearView() {
 	}
 	if strings.HasPrefix(currentView, "folder:") {
 		resetSelectionState(true)
+		_ = viewRoot.SetVisible(false)
+		viewRoot = nil
+		return
+	}
+	// message/compose are pooled too now (2026-09-11, garbled-text
+	// investigation) -- see messageDetailView/composeViewContainer's own
+	// doc comments. Only ErrorView still gets destroyed on every
+	// transition away: it's a rare, one-off path with no real reuse
+	// benefit, not worth the same treatment.
+	if currentView == "message" || currentView == "compose" {
 		_ = viewRoot.SetVisible(false)
 		viewRoot = nil
 		return
@@ -805,7 +829,7 @@ func showError(err error) error {
 // Go zero value "") and once per resume, via the rebuild closure
 // registered in init() below (natyv_resume's own hand-written code, see
 // main.go, has already restored currentView/currentFolder/
-// currentMessageSeq/pageSize/folderPage/appRoot from their Persisted[T]
+// currentMessageUID/pageSize/folderPage/appRoot from their Persisted[T]
 // handles by the time this runs).
 //
 // Deliberately does NOT itself call SetActiveRegion -- whichever content
@@ -839,7 +863,7 @@ func rebuildApp(parent widgets.Container) error {
 		if _, err := cachedListFolder(currentFolder, folderPage[currentFolder]); err != nil {
 			return showError(err)
 		}
-		return showMessage(currentMessageSeq)
+		return showMessage(currentMessageUID)
 	case currentView == "compose":
 		return showCompose()
 	default:
@@ -1002,7 +1026,7 @@ func navigatePage(folder string, newPage int) error {
 	}
 	fu.rowWidgets = map[int]widgets.Container{}
 	fu.rowCheckboxes = map[int]widgets.Checkbox{}
-	fu.selectedSeqs = map[int]bool{}
+	fu.selectedUIDs = map[int]bool{}
 	if fu.emptyLabel != 0 {
 		fu.emptyLabel.Destroy()
 		fu.emptyLabel = 0
@@ -1028,9 +1052,9 @@ func navigatePage(folder string, newPage int) error {
 		// Newest first, matching FolderView's own loop.
 		for i := len(rows) - 1; i >= 0; i-- {
 			row := rows[i]
-			seq := row.Seq
-			if err := MessageRow(uint32(fu.rowsContainer), seq, row.From, row.Subject,
-				func() error { return showMessage(seq) }, onRowSelect); err != nil {
+			uid := row.UID
+			if err := MessageRow(uint32(fu.rowsContainer), uid, row.From, row.Subject,
+				func() error { return showMessage(uid) }, onRowSelect); err != nil {
 				return err
 			}
 		}
@@ -1070,63 +1094,146 @@ func invalidateFolder(folder string) {
 
 // -- Read view --
 
-// headerFor looks up seq's real, untruncated From/Subject from
+// messageDetailView is the pooled, singleton message-detail Container --
+// built once, then reused (its From/Subject/Body updated in place, see
+// showMessage) on every later message open, instead of destroy+recreate
+// every time. Same motivation and shape as folderViews above, just a
+// single instance rather than a per-key map, since only one message is
+// ever open at a time.
+//
+// Real reason this was added (2026-09-11): opening a message looked, at
+// first, like a trigger for the render-loop-fix arc's own real SDL3/
+// WindowServer compositor bug (see the project_natyv_render_loop_fix
+// memory) -- that theory turned out wrong, disproven by direct evidence
+// (temporary diagnostic logging showed the widget's own buffer already
+// held the wrong data at sync time, before any rendering happened, which
+// a pure display-level bug can't produce). The real cause was a stale-
+// IMAP-identity bug (see imap.Message's own doc comment and
+// currentMessageUID below) -- unrelated to recycling or widget creation
+// timing at all, and this pooling change alone did not fix it. Keeping
+// this pooling anyway: it's a real, independent improvement (matches
+// folderViews' own already-proven "no flash on switch" benefit) with no
+// real cost, even though it wasn't the actual fix for what Quinn saw.
+//
+// messageDetailFrom/messageDetailSubject/messageDetailBody are ordinary
+// ref='d, non-struct-backed widgets (views.go.ntx) -- Mechanism 1 already
+// persists them automatically, same as toField/subjField/etc., so only
+// messageDetailView itself (a hand-derived copy of *viewRoot, not itself a
+// ref target) needs its own explicit Persisted[T] handle below, matching
+// folderViews' own precedent exactly.
+var messageDetailView widgets.Container
+var persistedMessageDetailView = natyv.Persisted[widgets.Container]("messageDetailView", 0)
+var messageDetailFrom *widgets.Label
+var messageDetailSubject *widgets.Label
+var messageDetailBody *widgets.TextArea
+
+// headerFor looks up uid's real, untruncated From/Subject from
 // currentFolder's own cached message list -- the same real imap.Message
 // values toInboxRows reads, before that function's own display-only
 // truncation (list rows are much narrower than the detail view, so
 // reusing its truncated strings here would clip text that doesn't
 // actually need clipping at this width).
-func headerFor(seq int) (from, subject string) {
+//
+// UID, not Seq (2026-09-11 fix): matching by the message's real, stable
+// identity instead of a position that can shift underneath a stale cache
+// entry -- see imap.Message's own doc comment for the real bug this
+// closes (a genuine, confirmed cause of garbled message-detail text, not
+// a rendering bug at all).
+func headerFor(uid int) (from, subject string) {
 	data := folderCache[folderCacheKey{currentFolder, folderPage[currentFolder]}]
 	for _, m := range data.msgs {
-		if m.Seq == seq {
+		if m.UID == uid {
 			return m.From, m.Subject
 		}
 	}
 	return "", ""
 }
 
-func showMessage(seq int) error {
-	body, err := readMessageBody(seq)
+func showMessage(uid int) error {
+	body, err := readMessageBody(uid)
 	if err != nil {
 		return showError(err)
 	}
-	from, subject := headerFor(seq)
+	from, subject := headerFor(uid)
+	from = truncateWithEllipsis(from, 100)
+	subject = truncateWithEllipsis(subject, 100)
+	decoded := decodeMimeBody(body)
+
 	clearView()
 	currentView = "message"
-	currentMessageSeq = seq
-	if err := MessageDetailView(*contentArea, truncateWithEllipsis(from, 100), truncateWithEllipsis(subject, 100), body, func() error { return showFolder(currentFolder) }); err != nil {
+	currentMessageUID = uid
+
+	if messageDetailView == 0 {
+		if err := MessageDetailView(*contentArea, from, subject, decoded, func() error { return showFolder(currentFolder) }); err != nil {
+			return err
+		}
+		// Part 2 (codegen automation) regen, 2026-09-11: no longer
+		// registered here -- bindKind="back_click" on the Back button's
+		// own tag (views.go.ntx) emits the RegisterBinding call directly
+		// at creation, and it only ever needs to fire once now that the
+		// button itself is only ever created this once.
+		messageDetailView = *viewRoot
+		return nil
+	}
+	if err := messageDetailFrom.SetText(from); err != nil {
 		return err
 	}
-	// Part 2 (codegen automation) regen, 2026-09-11: no longer registered
-	// here -- bindKind="back_click" on the Back button's own tag
-	// (views.go.ntx) emits the RegisterBinding call directly at creation.
-	// SetActiveRegion is no longer called here (2026-09-10,
-	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
-	// regionRegistry's stored recipes anymore now that natyv_checkpoint
-	// calls SnapshotBindings instead of SnapshotRegions, so this would
-	// just be building up dead state on every real navigation.
-	return nil
+	if err := messageDetailSubject.SetText(subject); err != nil {
+		return err
+	}
+	if err := messageDetailBody.SetText(decoded); err != nil {
+		return err
+	}
+	viewRoot = &messageDetailView
+	return messageDetailView.SetVisible(true)
 }
 
 // -- Compose view --
 
+// composeViewContainer is the pooled, singleton Compose Container -- same
+// shape and same real motivation as messageDetailView above. toField/
+// subjField/bodyField/statusLbl already carry their own ref= (views.go.ntx)
+// so Mechanism 1 already persists them automatically; only the container
+// itself (a hand-derived copy of *viewRoot) needs an explicit Persisted[T]
+// handle.
+var composeViewContainer widgets.Container
+var persistedComposeViewContainer = natyv.Persisted[widgets.Container]("composeViewContainer", 0)
+
 func showCompose() error {
 	clearView()
 	currentView = "compose"
-	if err := ComposeView(*contentArea); err != nil {
+
+	if composeViewContainer == 0 {
+		if err := ComposeView(*contentArea); err != nil {
+			return err
+		}
+		// Part 2 (codegen automation) regen, 2026-09-11: no longer
+		// registered here -- handleComposeSend is a bare, resplice-safe
+		// identifier (ComposeView takes no params), so safe-auto emits
+		// both the RegisterBinding call and a real rebind function
+		// directly, and it only ever needs to fire once now that the
+		// button itself is only ever created this once.
+		composeViewContainer = *viewRoot
+		return nil
+	}
+	// Reset to the same fresh-compose state a brand-new build always
+	// started at -- "Body" matches TextArea's own .ntx default child text,
+	// not an arbitrary empty string, so a pooled reuse looks identical to
+	// a real fresh build.
+	if err := toField.Clear(); err != nil {
 		return err
 	}
-	// Part 2 (codegen automation) regen, 2026-09-11: no longer registered
-	// here -- handleComposeSend is a bare, resplice-safe identifier
-	// (ComposeView takes no params), so safe-auto now emits both the
-	// RegisterBinding call and a real rebind function directly.
-	// SetActiveRegion is no longer called here (2026-09-10,
-	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
-	// regionRegistry's stored recipes anymore now that natyv_checkpoint
-	// calls SnapshotBindings instead of SnapshotRegions, so this would
-	// just be building up dead state on every real navigation.
-	return nil
+	if err := subjField.Clear(); err != nil {
+		return err
+	}
+	if err := bodyField.SetText("Body"); err != nil {
+		return err
+	}
+	if err := statusLbl.SetText(""); err != nil {
+		return err
+	}
+	viewRoot = &composeViewContainer
+	return composeViewContainer.SetVisible(true)
 }
 
 // -- Toolbar handlers, referenced by app.go.ntx's onClick={...} bindings --

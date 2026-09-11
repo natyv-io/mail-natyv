@@ -48,10 +48,18 @@ func FolderView(parent widgets.Container, folder string, rows []inboxRow, folder
 // alive at once, each with its own permanently-registered Checkbox
 // onClick closure, so it can't share a single package-level slot the way
 // rowWidget now safely does.
-func MessageRow(parent uint32, seq int, from string, subject string, onOpen func() error, onSelect func(seq int, checked bool) error) error {
-	return natyvBuildMessageRow(parent, seq, from, subject, onOpen, onSelect)
+func MessageRow(parent uint32, uid int, from string, subject string, onOpen func() error, onSelect func(uid int, checked bool) error) error {
+	return natyvBuildMessageRow(parent, uid, from, subject, onOpen, onSelect)
 }
 
+// From/Subject/Body all carry their own ref= now (2026-09-11, garbled-text
+// investigation) so showMessage can update them in place on a pooled,
+// already-built view instead of destroying and recreating this whole
+// subtree on every single message open -- see ui.go's own doc comment on
+// messageDetailView for the real reasoning. body arrives already
+// MIME-decoded (showMessage's own job now, not this composer's) so the
+// same already-decoded string can be handed to SetText on the reuse path
+// without decoding it twice.
 func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
 	return natyvBuildMessageDetailView(parent, from, subject, body, onBack)
 }

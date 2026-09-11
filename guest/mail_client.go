@@ -93,12 +93,19 @@ func listFolder(mailbox string, page, pageSize int) (msgs []imap.Message, canGoO
 // behind whatever folder the UI is currently showing; fetching a body
 // against the wrong mailbox is what "imap: no such message" really means
 // here, not a genuinely missing message (confirmed live, 2026-09-02).
-func readMessageBody(seq int) (body string, err error) {
+//
+// Takes uid, not a sequence number (2026-09-11 fix) -- imap.Client.FetchBody
+// now does a real UID FETCH, so this always fetches the actual message the
+// user clicked regardless of what else has happened to the mailbox since
+// its row was listed. See imap.Message's own doc comment for the real bug
+// this closes: a Seq-based fetch here could silently return a completely
+// different message's body once new mail shifted the mailbox's numbering.
+func readMessageBody(uid int) (body string, err error) {
 	err = withIMAPRetry(func() error {
 		if _, serr := imapClient.Select(currentFolder); serr != nil {
 			return serr
 		}
-		fetched, ferr := imapClient.FetchBody(seq)
+		fetched, ferr := imapClient.FetchBody(uid)
 		if ferr != nil {
 			return ferr
 		}
@@ -108,19 +115,21 @@ func readMessageBody(seq int) (body string, err error) {
 	return
 }
 
-// deleteMessage removes seq from whichever mailbox is currently selected.
-// Real caveat, inherited from imap.Client.Delete: against Gmail this
-// archives rather than permanently deletes. Re-selects currentFolder on
-// every attempt, not just the first -- a reconnect inside withIMAPRetry
-// produces a brand-new connection with nothing selected at all, so a bare
-// retry of Delete alone (relying on some earlier call's own Select still
-// being in effect) would fail differently against a fresh connection.
-func deleteMessage(seq int) error {
+// deleteMessage removes uid from whichever mailbox is currently selected --
+// takes a stable UID, not a sequence number (2026-09-11 fix, same reasoning
+// as readMessageBody above). Real caveat, inherited from imap.Client.Delete:
+// against Gmail this archives rather than permanently deletes. Re-selects
+// currentFolder on every attempt, not just the first -- a reconnect inside
+// withIMAPRetry produces a brand-new connection with nothing selected at
+// all, so a bare retry of Delete alone (relying on some earlier call's own
+// Select still being in effect) would fail differently against a fresh
+// connection.
+func deleteMessage(uid int) error {
 	return withIMAPRetry(func() error {
 		if _, serr := imapClient.Select(currentFolder); serr != nil {
 			return serr
 		}
-		return imapClient.Delete(seq)
+		return imapClient.Delete(uid)
 	})
 }
 
