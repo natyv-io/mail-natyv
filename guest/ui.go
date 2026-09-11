@@ -39,16 +39,13 @@ var appRootLayout = widgets.Layout{Sizing: widgets.Sizing{Width: widgets.Grow(),
 // Pointer type: ref={&x} generates "x = &<createdVar>", so x itself must
 // already be declared *widgets.Container for that assignment to type-check.
 //
-// Persisted (2026-09-10, resume-without-recreate plan, Mechanism 1): used
-// to assume App(appRoot) (called by rebuildApp on every fresh
-// instantiation) always set this fresh as an ordinary side effect of
-// running -- no longer true now that natyv_resume reattaches handlers
-// instead of rebuilding the tree, so a resumed instance never calls App
-// at all. Batched into natyvCheckpoint/natyvResume (main.go), not set at
-// this var's own assignment site (app.natyv.go, generated, DO-NOT-EDIT).
+// Part 2 (codegen automation) regen, 2026-09-11: persistence used to be
+// hand-batched here (Mechanism 1's own manual precursor) -- now automatic,
+// natyv_generated.go's own genSnapshotRefs/genRestoreRefs (called via
+// GeneratedCheckpoint/GeneratedResume, main.go) handle every ref='d
+// non-struct-backed widget in this file unconditionally, this one
+// included, with no hand-written Set/Get needed anymore.
 var contentArea *widgets.Container
-var persistedContentArea = natyv.Persisted[widgets.Container]("contentArea", 0)
-var restoredContentArea widgets.Container
 
 // viewRoot is the current dynamic view's own single root Container --
 // bound directly by each view composer's own top-level `ref={&viewRoot}`
@@ -57,34 +54,18 @@ var restoredContentArea widgets.Container
 // generates "x = &<createdVar>". Swapped out on every view switch.
 // Destroying it alone cascades through everything the view created
 // (natyv-core's own destroy now cascades to every real Clay descendant),
-// so no per-widget tracking is needed.
-//
-// Persisted (2026-09-10, resume-without-recreate plan, Mechanism 1),
-// same reasoning as contentArea above -- only meaningful while
-// currentView == "compose" (the one real reader, handleComposeSend,
-// below), but batched unconditionally alongside contentArea for the same
-// reason: cheap, and simpler than conditioning the persist on
-// currentView.
+// so no per-widget tracking is needed. Persistence is automatic now, same
+// as contentArea above.
 var viewRoot *widgets.Container
-var persistedViewRoot = natyv.Persisted[widgets.Container]("viewRoot", 0)
-var restoredViewRoot widgets.Container
 
 // toField/subjField/bodyField/statusLbl are bound by ComposeView's own
 // ref={&x} attributes -- handleComposeSend (below) reads/clears them by
-// these same package-level names. Persisted (Mechanism 1) the same way
-// as viewRoot immediately above.
+// these same package-level names. Persistence is automatic now, same as
+// contentArea/viewRoot above.
 var toField *widgets.TextField
 var subjField *widgets.TextField
 var bodyField *widgets.TextArea
 var statusLbl *widgets.Label
-var persistedToField = natyv.Persisted[widgets.TextField]("toField", 0)
-var persistedSubjField = natyv.Persisted[widgets.TextField]("subjField", 0)
-var persistedBodyField = natyv.Persisted[widgets.TextArea]("bodyField", 0)
-var persistedStatusLbl = natyv.Persisted[widgets.Label]("statusLbl", 0)
-var restoredToField widgets.TextField
-var restoredSubjField widgets.TextField
-var restoredBodyField widgets.TextArea
-var restoredStatusLbl widgets.Label
 
 // handleComposeSend is ComposeView's own Send button handler, extracted
 // to a real named function (2026-09-10, resume-without-recreate plan,
@@ -214,24 +195,15 @@ var pagerLabelWidget *widgets.Label
 var rowWidget *widgets.Container
 var deleteSelectedBtn *widgets.Button
 
-// inboxBtn/sentBtn/composeBtn (App), refreshBtn/backBtn (FolderView/
-// MessageDetailView), sendBtn (ComposeView) -- same shared-ref-slot
-// reasoning as above, added 2026-09-10 (resume-without-recreate plan,
-// step 5) purely so RegisterBinding has a widget id to bind against right
-// after creation; none of these are read anywhere else the way
-// rowsContainer/pagerLabelWidget are.
-var inboxBtn *widgets.Button
-var sentBtn *widgets.Button
-var composeBtn *widgets.Button
-var refreshBtn *widgets.Button
-var backBtn *widgets.Button
-var sendBtn *widgets.Button
-
-// pageSizeDropdown (FolderView) -- struct-backed (*widgets.Dropdown, not
-// a bare uint32), added once widgets.WrapDropdown existed (2026-09-10,
-// same session, later) to close out the one handler kind deferred when
-// step 5 first landed.
-var pageSizeDropdown *widgets.Dropdown
+// Part 2 (codegen automation) regen, 2026-09-11: inboxBtn/sentBtn/
+// composeBtn/refreshBtn/backBtn/sendBtn/pageSizeDropdown (the vars this
+// comment used to document) are gone -- every one of them existed purely
+// so a RegisterBinding call elsewhere in this file had a widget id to
+// bind against, and that's now handled directly by the generated
+// RegisterBinding call at each tag's own creation site (auto for nav_*/
+// compose_send_click, via bindKind=/bindArgs= for refresh_click/
+// back_click/page_size_change) -- no ref= or package-level slot needed
+// for that purpose anymore.
 
 // setPageSize changes how many messages a folder page holds and applies
 // it immediately. Every folder's own already-cached pages and persisted
@@ -529,20 +501,18 @@ func activateFolder(folder string) {
 // safe since a MessageRow is only ever built while its own folder is the
 // one being built/rebuilt.
 //
-// Also record a binding (natyv.RegisterBinding) alongside the real
-// bookkeeping -- see rowOpenArgs/rebindRowOpen and rebindRowCheckboxToggle
-// below for what reattaches on resume. currentFolder is read here, not
-// threaded as a param: both real callers (FolderView's own initial-rows
-// loop, navigatePage's rows-only rebuild) only ever build a row for
-// whichever folder is currently being (re)built -- the same implicit
-// invariant onRowSelect/active already rely on.
+// Part 2 (codegen automation) regen, 2026-09-11: pure bookkeeping now --
+// each tag's own bindKind="row_open"/"row_checkbox_toggle" bindArgs={...}
+// (views.go.ntx) emits the real RegisterBinding call directly at creation
+// time, so these two functions no longer need to duplicate it. rowArgs/
+// rebindRowOpen/rebindRowCheckboxToggle below are unchanged -- still
+// hand-written, since the real handlers are closures the safe-auto
+// classifier correctly never attempts to resplice.
 func registerRowWidget(seq int, w widgets.Container) {
     active.rowWidgets[seq] = w
-    _ = natyv.RegisterBinding(uint32(w), "row_open", rowArgs{Seq: seq, Folder: currentFolder})
 }
 func registerRowCheckbox(seq int, cb widgets.Checkbox) {
     active.rowCheckboxes[seq] = cb
-    _ = natyv.RegisterBinding(uint32(cb), "row_checkbox_toggle", rowArgs{Seq: seq, Folder: currentFolder})
 }
 
 // rowArgs is the persisted-args shape for both row_open and
@@ -613,6 +583,36 @@ func updateDeleteSelectedLabel() {
 		return
 	}
 	_ = active.deleteBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(active.selectedSeqs)))
+}
+
+// TEMPORARY -- step 13 live-testing aid only, remove after testing
+// (Quinn's own request, 2026-09-11). Mirrors ntx-recycle-fixture's own
+// growMemory(): ~1MB of retained dummy data per click, since real
+// recycle_threshold_mb-crossing memory growth is otherwise slow/unreliable
+// to force by hand while testing the regenerated bindings. Click count is
+// persisted (Mechanism 1 covers growMemoryBtn's own widget id
+// automatically; the count itself needs its own Persisted[int] the same
+// way clickCounter did in the fixture) so it keeps climbing correctly
+// across repeated recycles instead of resetting each time.
+var growMemoryBtn *widgets.Button
+var persistedGrowMemoryClickCount = natyv.Persisted[int]("growMemoryClickCount", 0)
+var growMemoryClickCount int
+var growMemoryDummyData [][]byte
+
+func handleGrowMemory() error {
+	growMemoryClickCount++
+	if err := persistedGrowMemoryClickCount.Set(growMemoryClickCount); err != nil {
+		return err
+	}
+	chunk := make([]byte, 1024*1024)
+	for i := range chunk {
+		chunk[i] = byte(i)
+	}
+	growMemoryDummyData = append(growMemoryDummyData, chunk)
+	if growMemoryBtn != nil {
+		_ = growMemoryBtn.SetLabel(fmt.Sprintf("Grow Memory (%d)", growMemoryClickCount))
+	}
+	return nil
 }
 
 // resetSelectionState clears whatever's currently selected on the active
@@ -735,39 +735,23 @@ func rebindRefreshClick(widgetID uint32, args json.RawMessage) error {
 	return nil
 }
 
-// rebindNavInbox/rebindNavSent/rebindNavCompose all take no args -- the
-// real handlers (handleShowInbox/handleShowSent/handleShowCompose) are
-// already plain named functions with zero captured state, so reattaching
-// is just re-registering the same function value directly, no closure
-// reconstruction needed.
-func rebindNavInbox(widgetID uint32, args json.RawMessage) error {
-	widgets.WrapButton(widgetID).OnClick(handleShowInbox)
-	return nil
-}
-func rebindNavSent(widgetID uint32, args json.RawMessage) error {
-	widgets.WrapButton(widgetID).OnClick(handleShowSent)
-	return nil
-}
-func rebindNavCompose(widgetID uint32, args json.RawMessage) error {
-	widgets.WrapButton(widgetID).OnClick(handleShowCompose)
-	return nil
-}
+// Part 2 (codegen automation) regen, 2026-09-11: rebindNavInbox/
+// rebindNavSent/rebindNavCompose/rebindComposeSendClick are gone --
+// handleShowInbox/handleShowSent/handleShowCompose/handleComposeSend are
+// all already plain named functions with zero captured state (App/
+// ComposeView take no relevant params), so codegen's own safe-auto
+// classifier (isSafeToResplice + bare-identifier-only) now auto-generates
+// both the RegisterBinding call and the rebind function for all four --
+// nothing hand-written needed here anymore.
 
 // rebindBackClick takes no args -- the real onBack closure
 // (MessageDetailView's own call site) captures nothing, reading
-// currentFolder live.
+// currentFolder live. Still hand-written: onBack is a composer param
+// (MessageDetailView's own signature), so safe-auto correctly never
+// attempts to resplice it -- bindKind="back_click" (views.go.ntx) hands
+// off to this instead.
 func rebindBackClick(widgetID uint32, args json.RawMessage) error {
 	widgets.WrapButton(widgetID).OnClick(func() error { return showFolder(currentFolder) })
-	return nil
-}
-
-// rebindComposeSendClick takes no args -- handleComposeSend (ui.go, below)
-// is a real named function extracted from what used to be ComposeView's
-// own inline onClick closure specifically so both the real .ntx build and
-// this rebind path can reference the identical logic, matching
-// handleShowInbox/handleShowSent/handleShowCompose's own precedent.
-func rebindComposeSendClick(widgetID uint32, args json.RawMessage) error {
-	widgets.WrapButton(widgetID).OnClick(handleComposeSend)
 	return nil
 }
 
@@ -776,6 +760,9 @@ func rebindComposeSendClick(widgetID uint32, args json.RawMessage) error {
 // same options list CreateDropdown (called inside FolderView's own
 // generated code) was originally given -- pageSizeOptions itself, not a
 // copy, since it's a fixed package-level var never mutated after init.
+// Still hand-written: onPageSize is a composer param (FolderView's own
+// signature), so safe-auto never attempts it -- bindKind="page_size_change"
+// (views.go.ntx) hands off to this instead.
 func rebindPageSizeChange(widgetID uint32, args json.RawMessage) error {
 	widgets.WrapDropdown(widgetID, pageSizeOptions).OnSelect(onPageSize)
 	return nil
@@ -786,11 +773,7 @@ func init() {
 	natyv.RegisterHandlerFunc("delete_selected_click", rebindDeleteSelectedClick)
 	natyv.RegisterHandlerFunc("refresh_click", rebindRefreshClick)
 	natyv.RegisterHandlerFunc("page_size_change", rebindPageSizeChange)
-	natyv.RegisterHandlerFunc("nav_inbox", rebindNavInbox)
-	natyv.RegisterHandlerFunc("nav_sent", rebindNavSent)
-	natyv.RegisterHandlerFunc("nav_compose", rebindNavCompose)
 	natyv.RegisterHandlerFunc("back_click", rebindBackClick)
-	natyv.RegisterHandlerFunc("compose_send_click", rebindComposeSendClick)
 }
 
 // currentView identifies whatever's actually rendered under viewRoot right
@@ -865,16 +848,12 @@ func rebuildApp(parent widgets.Container) error {
 	if err := App(parent); err != nil {
 		return err
 	}
-	// inboxBtn/sentBtn/composeBtn (package-level ref vars, set by App's own
-	// ref={&x} attributes) are only ever built once, here -- App itself
-	// never runs again for the life of an instance (rebuildApp only calls
-	// it from natyv_init; a resumed instance reattaches instead, see
-	// main.go's natyv_resume). Registered here rather than inside App's
-	// own <%%> body since .ntx composer bodies land in the generated
-	// file, whose auto-import only detects `widgets.` usage, not `natyv.`.
-	_ = natyv.RegisterBinding(uint32(*inboxBtn), "nav_inbox", nil)
-	_ = natyv.RegisterBinding(uint32(*sentBtn), "nav_sent", nil)
-	_ = natyv.RegisterBinding(uint32(*composeBtn), "nav_compose", nil)
+	// Part 2 (codegen automation) regen, 2026-09-11: App's own three
+	// toolbar buttons no longer need registering here -- safe-auto now
+	// emits their RegisterBinding call (and a real rebind function)
+	// directly inside app.go.ntx's own generated output, since
+	// handleShowInbox/handleShowSent/handleShowCompose are all bare,
+	// resplice-safe identifiers.
 	if err := connectIMAP(); err != nil {
 		return err
 	}
@@ -974,7 +953,13 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 	if err != nil {
 		return showError(err)
 	}
-	if err := FolderView(*contentArea, toInboxRows(data.msgs), folderDisplayName(folder), page, fmt.Sprintf("Page %d", page+1), data.canGoOlder, pageSizeLabel(),
+	// Part 2 (codegen automation) regen, 2026-09-11: folder is now a real
+	// FolderView param (views.go.ntx), specifically so refresh_click/
+	// pager_nav's own bindKind=/bindArgs= have it in scope -- closes the
+	// one residual case the plan's own §1(c) documented (folder previously
+	// existed only in this closure's own scope, never passed into
+	// FolderView at all).
+	if err := FolderView(*contentArea, folder, toInboxRows(data.msgs), folderDisplayName(folder), page, fmt.Sprintf("Page %d", page+1), data.canGoOlder, pageSizeLabel(),
 		func() error { return navigatePage(folder, folderPage[folder]-1) },
 		func() error { return navigatePage(folder, folderPage[folder]+1) },
 		func() error {
@@ -990,25 +975,20 @@ func renderFolder(folder string, page int, forceRebuild bool) error {
 		onPageSize,
 		onDeleteSelected,
 		func() error {
+			// Pure harvesting now -- every RegisterBinding call that used
+			// to live here (pager_nav x2, delete_selected_click,
+			// refresh_click, page_size_change) is now emitted directly at
+			// each tag's own creation site in views.go.ntx instead
+			// (bindKind=/bindArgs=, or automatically for the two that
+			// don't need any -- none of these five actually qualify for
+			// safe-auto, since onOlder/onNewer/onDeleteSelected/onPageSize
+			// are all composer params).
 			fu := folderUIs[folder]
 			fu.rowsContainer = *rowsContainer
 			fu.olderBtn = *olderBtn
 			fu.newerBtn = *newerBtn
 			fu.pageLabel = *pagerLabelWidget
 			fu.deleteBtn = *deleteSelectedBtn
-			_ = natyv.RegisterBinding(uint32(fu.olderBtn), "pager_nav", pagerArgs{Folder: folder, Delta: 1})
-			_ = natyv.RegisterBinding(uint32(fu.newerBtn), "pager_nav", pagerArgs{Folder: folder, Delta: -1})
-			_ = natyv.RegisterBinding(uint32(fu.deleteBtn), "delete_selected_click", nil)
-			// refreshBtn (package-level ref var, set by FolderView's own
-			// ref={&refreshBtn}) needs `folder` from this closure's own
-			// scope, which FolderView itself never receives as a param --
-			// registered here rather than inside FolderView's own <%%>
-			// body for that reason, same as the three bindings above it.
-			_ = natyv.RegisterBinding(uint32(*refreshBtn), "refresh_click", refreshArgs{Folder: folder})
-			// pageSizeDropdown.ID() is its own trigger's widget id (see
-			// Dropdown.ID's own doc comment) -- onPageSize captures
-			// nothing, same nil-args shape as delete_selected_click.
-			_ = natyv.RegisterBinding(pageSizeDropdown.ID(), "page_size_change", nil)
 			return nil
 		},
 	); err != nil {
@@ -1148,10 +1128,9 @@ func showMessage(seq int) error {
 	if err := MessageDetailView(*contentArea, truncateWithEllipsis(from, 100), truncateWithEllipsis(subject, 100), body, func() error { return showFolder(currentFolder) }); err != nil {
 		return err
 	}
-	// backBtn (package-level ref var, set by MessageDetailView's own
-	// ref={&backBtn}) -- see rebuildApp's own comment on why this is
-	// registered here rather than inside the .ntx composer's own body.
-	_ = natyv.RegisterBinding(uint32(*backBtn), "back_click", nil)
+	// Part 2 (codegen automation) regen, 2026-09-11: no longer registered
+	// here -- bindKind="back_click" on the Back button's own tag
+	// (views.go.ntx) emits the RegisterBinding call directly at creation.
 	// SetActiveRegion is no longer called here (2026-09-10,
 	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
 	// regionRegistry's stored recipes anymore now that natyv_checkpoint
@@ -1168,10 +1147,10 @@ func showCompose() error {
 	if err := ComposeView(*contentArea); err != nil {
 		return err
 	}
-	// sendBtn (package-level ref var, set by ComposeView's own
-	// ref={&sendBtn}) -- see rebuildApp's own comment on why this is
-	// registered here rather than inside the .ntx composer's own body.
-	_ = natyv.RegisterBinding(uint32(*sendBtn), "compose_send_click", nil)
+	// Part 2 (codegen automation) regen, 2026-09-11: no longer registered
+	// here -- handleComposeSend is a bare, resplice-safe identifier
+	// (ComposeView takes no params), so safe-auto now emits both the
+	// RegisterBinding call and a real rebind function directly.
 	// SetActiveRegion is no longer called here (2026-09-10,
 	// resume-without-recreate plan, step 7 cleanup) -- nothing ever reads
 	// regionRegistry's stored recipes anymore now that natyv_checkpoint

@@ -33,6 +33,17 @@ func natyvInit() int32 {
     return 0
 }
 
+// Part 2 (codegen automation) regen, 2026-09-11: contentArea/viewRoot/
+// toField/subjField/bodyField/statusLbl are no longer hand-persisted
+// here -- every one of them is a plain ref='d, non-struct-backed widget,
+// so GeneratedCheckpoint (below, via genSnapshotRefs) now handles all six
+// automatically. What's left here is exactly the plan's own §3.7 "honest
+// limit": real app data with no .ntx connection at all (currentFolder/
+// pageSize/folderPage/currentView/currentMessageSeq/folderViews/
+// folderViewPage), plus folderUIs' own dynamic, string-keyed
+// widgetSnap -- genuinely invisible to codegen by construction, not by
+// omission.
+//
 //go:wasmexport natyv_checkpoint
 func natyvCheckpoint() int32 {
     if err := persistedCurrentFolder.Set(currentFolder); err != nil {
@@ -54,42 +65,6 @@ func natyvCheckpoint() int32 {
     if err := persistedCurrentMessageSeq.Set(currentMessageSeq); err != nil {
         pdk.SetErrorString(err.Error())
         return 1
-    }
-    if contentArea != nil {
-        if err := persistedContentArea.Set(*contentArea); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
-    }
-    if viewRoot != nil {
-        if err := persistedViewRoot.Set(*viewRoot); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
-    }
-    if toField != nil {
-        if err := persistedToField.Set(*toField); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
-    }
-    if subjField != nil {
-        if err := persistedSubjField.Set(*subjField); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
-    }
-    if bodyField != nil {
-        if err := persistedBodyField.Set(*bodyField); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
-    }
-    if statusLbl != nil {
-        if err := persistedStatusLbl.Set(*statusLbl); err != nil {
-            pdk.SetErrorString(err.Error())
-            return 1
-        }
     }
     if err := persistedFolderViews.Set(folderViews); err != nil {
         pdk.SetErrorString(err.Error())
@@ -124,7 +99,7 @@ func natyvCheckpoint() int32 {
         pdk.SetErrorString(err.Error())
         return 1
     }
-    data, err := natyv.SnapshotBindings()
+    data, err := GeneratedCheckpoint()
     if err != nil {
         pdk.SetErrorString(err.Error())
         return 1
@@ -176,47 +151,14 @@ func natyvResume() int32 {
         pdk.SetErrorString(err.Error())
         return 1
     }
-    if restored, err := persistedContentArea.Get(); err != nil {
+    // Part 2 (codegen automation) regen, 2026-09-11: contentArea/viewRoot/
+    // toField/subjField/bodyField/statusLbl restoration is no longer
+    // hand-written here -- GeneratedResume (below, via genRestoreRefs)
+    // handles all six automatically now.
+    // TEMPORARY -- step 13 live-testing aid only, remove after testing.
+    if growMemoryClickCount, err = persistedGrowMemoryClickCount.Get(); err != nil {
         pdk.SetErrorString(err.Error())
         return 1
-    } else if restored != 0 {
-        restoredContentArea = restored
-        contentArea = &restoredContentArea
-    }
-    if restored, err := persistedViewRoot.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    } else if restored != 0 {
-        restoredViewRoot = restored
-        viewRoot = &restoredViewRoot
-    }
-    if restored, err := persistedToField.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    } else if restored != 0 {
-        restoredToField = restored
-        toField = &restoredToField
-    }
-    if restored, err := persistedSubjField.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    } else if restored != 0 {
-        restoredSubjField = restored
-        subjField = &restoredSubjField
-    }
-    if restored, err := persistedBodyField.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    } else if restored != 0 {
-        restoredBodyField = restored
-        bodyField = &restoredBodyField
-    }
-    if restored, err := persistedStatusLbl.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    } else if restored != 0 {
-        restoredStatusLbl = restored
-        statusLbl = &restoredStatusLbl
     }
     if folderViews, err = persistedFolderViews.Get(); err != nil {
         pdk.SetErrorString(err.Error())
@@ -273,7 +215,7 @@ func natyvResume() int32 {
         }
     }
     activateFolder(currentFolder)
-    if err := natyv.RestoreBindings(pdk.Input()); err != nil {
+    if err := GeneratedResume(pdk.Input()); err != nil {
         pdk.SetErrorString(err.Error())
         return 1
     }

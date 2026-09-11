@@ -19,9 +19,14 @@ func ErrorView(parent widgets.Container, message string) error {
 // activateFolder/folderUI) without FolderView itself needing to know
 // anything about per-folder bookkeeping. Takes no params: everything it
 // needs is already sitting in these same package-level ref slots by the
-// time it runs.
-func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, page int, pageLabel string, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error, onBuilt func() error) error {
-	return natyvBuildFolderView(parent, rows, folderLabel, page, pageLabel, canGoOlder, pageSizeLabel, onNewer, onOlder, onRefresh, onPageSize, onDeleteSelected, onBuilt)
+// time it runs. Part 2 (codegen automation) regen, 2026-09-11: onBuilt no
+// longer also registers pager_nav/delete_selected_click/refresh_click/
+// page_size_change bindings itself -- bindKind=/bindArgs= on each tag
+// above does that automatically now (folder, promoted to a real param
+// here specifically to make refresh_click/pager_nav's own bindArgs
+// possible), so onBuilt is back to pure harvesting.
+func FolderView(parent widgets.Container, folder string, rows []inboxRow, folderLabel string, page int, pageLabel string, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error, onBuilt func() error) error {
+	return natyvBuildFolderView(parent, folder, rows, folderLabel, page, pageLabel, canGoOlder, pageSizeLabel, onNewer, onOlder, onRefresh, onPageSize, onDeleteSelected, onBuilt)
 }
 
 // MessageRow's own top-level element is its real, directly-clickable row

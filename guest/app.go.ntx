@@ -7,9 +7,9 @@ expose App
 func App(parent widgets.Container) error {
     <Container styles={root}>
         <Container styles={toolbar}>
-            <Button ref={&inboxBtn} styles={toolbarBtn} onClick={handleShowInbox}>Inbox</Button>
-            <Button ref={&sentBtn} styles={toolbarBtn} onClick={handleShowSent}>Sent</Button>
-            <Button ref={&composeBtn} styles={toolbarBtn} onClick={handleShowCompose}>Compose</Button>
+            <Button styles={toolbarBtn} onClick={handleShowInbox}>Inbox</Button>
+            <Button styles={toolbarBtn} onClick={handleShowSent}>Sent</Button>
+            <Button styles={toolbarBtn} onClick={handleShowCompose}>Compose</Button>
         </Container>
         <Container ref={&contentArea} styles={content}>
         </Container>

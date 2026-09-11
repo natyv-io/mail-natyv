@@ -21,14 +21,20 @@ func ErrorView(parent widgets.Container, message string) error {
 // activateFolder/folderUI) without FolderView itself needing to know
 // anything about per-folder bookkeeping. Takes no params: everything it
 // needs is already sitting in these same package-level ref slots by the
-// time it runs.
-func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, page int, pageLabel string, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error, onBuilt func() error) error {
+// time it runs. Part 2 (codegen automation) regen, 2026-09-11: onBuilt no
+// longer also registers pager_nav/delete_selected_click/refresh_click/
+// page_size_change bindings itself -- bindKind=/bindArgs= on each tag
+// above does that automatically now (folder, promoted to a real param
+// here specifically to make refresh_click/pager_nav's own bindArgs
+// possible), so onBuilt is back to pure harvesting.
+func FolderView(parent widgets.Container, folder string, rows []inboxRow, folderLabel string, page int, pageLabel string, canGoOlder bool, pageSizeLabel string, onNewer func() error, onOlder func() error, onRefresh func() error, onPageSize func(index int) error, onDeleteSelected func() error, onBuilt func() error) error {
     <Container ref={&viewRoot} styles={content}>
         <Label text={folderLabel} styles={field} />
         <Container styles={btnRow}>
-            <Button ref={&refreshBtn} styles={primaryBtn} onClick={onRefresh}>Refresh</Button>
-            <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected}>Delete Selected</Button>
-            <Dropdown ref={&pageSizeDropdown} text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} />
+            <Button styles={primaryBtn} onClick={onRefresh} bindKind="refresh_click" bindArgs={refreshArgs{Folder: folder}}>Refresh</Button>
+            <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected} bindKind="delete_selected_click" bindArgs={nil}>Delete Selected</Button>
+            <Button ref={&growMemoryBtn} styles={dangerBtn} onClick={handleGrowMemory}>Grow Memory (0)</Button>
+            <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} bindKind="page_size_change" bindArgs={nil} />
         </Container>
         <Container ref={&rowsContainer} styles={rowsList}>
             <%
@@ -51,9 +57,9 @@ func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, p
             %>
         </Container>
         <Container styles={pagerRow}>
-            <Button ref={&newerBtn} styles={secondaryBtn, pagerBtn} onClick={onNewer} text={"<"} />
+            <Button ref={&newerBtn} styles={secondaryBtn, pagerBtn} onClick={onNewer} text={"<"} bindKind="pager_nav" bindArgs={pagerArgs{Folder: folder, Delta: -1}} />
             <Label ref={&pagerLabelWidget} text={pageLabel} styles={pagerLabel} />
-            <Button ref={&olderBtn} styles={secondaryBtn, pagerBtn} onClick={onOlder} text={">"} />
+            <Button ref={&olderBtn} styles={secondaryBtn, pagerBtn} onClick={onOlder} text={">"} bindKind="pager_nav" bindArgs={pagerArgs{Folder: folder, Delta: 1}} />
             <%
                 _ = olderBtn.SetEnabled(canGoOlder)
                 _ = newerBtn.SetEnabled(page > 0)
@@ -83,7 +89,7 @@ func FolderView(parent widgets.Container, rows []inboxRow, folderLabel string, p
 // onClick closure, so it can't share a single package-level slot the way
 // rowWidget now safely does.
 func MessageRow(parent uint32, seq int, from string, subject string, onOpen func() error, onSelect func(seq int, checked bool) error) error {
-    <Container ref={&rowWidget} styles={row} onClick={onOpen}>
+    <Container ref={&rowWidget} styles={row} onClick={onOpen} bindKind="row_open" bindArgs={rowArgs{Seq: seq, Folder: currentFolder}}>
         <Container styles={rowContent}>
             <%
                 var checkbox *widgets.Checkbox
@@ -93,7 +99,7 @@ func MessageRow(parent uint32, seq int, from string, subject string, onOpen func
                         return err
                     }
                     return onSelect(seq, checked)
-                }} ref={&checkbox} />
+                }} ref={&checkbox} bindKind="row_checkbox_toggle" bindArgs={rowArgs{Seq: seq, Folder: currentFolder}} />
                 registerRowCheckbox(seq, *checkbox)
             %>
             <Container styles={rowText}>
@@ -109,7 +115,7 @@ func MessageRow(parent uint32, seq int, from string, subject string, onOpen func
 
 func MessageDetailView(parent widgets.Container, from string, subject string, body string, onBack func() error) error {
     <Container ref={&viewRoot} styles={content}>
-        <Button ref={&backBtn} styles={secondaryBtn} onClick={onBack}>< Back</Button>
+        <Button styles={secondaryBtn} onClick={onBack} bindKind="back_click" bindArgs={nil}>< Back</Button>
         <Label text={from} styles={field} />
         <Label text={subject} styles={field} />
         <TextArea text={decodeMimeBody(body)} styles={bodyArea} />
@@ -122,6 +128,6 @@ func ComposeView(parent widgets.Container) error {
         <TextField ref={&subjField} styles={field} placeholder="Subject" />
         <TextArea ref={&bodyField} styles={field}>Body</TextArea>
         <Label ref={&statusLbl} />
-        <Button ref={&sendBtn} styles={primaryBtn} onClick={handleComposeSend}>Send</Button>
+        <Button styles={primaryBtn} onClick={handleComposeSend}>Send</Button>
     </Container>
 }
