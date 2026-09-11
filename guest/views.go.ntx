@@ -33,7 +33,6 @@ func FolderView(parent widgets.Container, folder string, rows []inboxRow, folder
         <Container styles={btnRow}>
             <Button styles={primaryBtn} onClick={onRefresh} bindKind="refresh_click" bindArgs={refreshArgs{Folder: folder}}>Refresh</Button>
             <Button ref={&deleteSelectedBtn} styles={dangerBtn} onClick={onDeleteSelected} bindKind="delete_selected_click" bindArgs={nil}>Delete Selected</Button>
-            <Button ref={&growMemoryBtn} styles={dangerBtn} onClick={handleGrowMemory}>Grow Memory (0)</Button>
             <Dropdown text={pageSizeLabel} options={pageSizeOptions} onSelect={onPageSize} bindKind="page_size_change" bindArgs={nil} />
         </Container>
         <Container ref={&rowsContainer} styles={rowsList}>

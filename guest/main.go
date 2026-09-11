@@ -155,11 +155,6 @@ func natyvResume() int32 {
     // toField/subjField/bodyField/statusLbl restoration is no longer
     // hand-written here -- GeneratedResume (below, via genRestoreRefs)
     // handles all six automatically now.
-    // TEMPORARY -- step 13 live-testing aid only, remove after testing.
-    if growMemoryClickCount, err = persistedGrowMemoryClickCount.Get(); err != nil {
-        pdk.SetErrorString(err.Error())
-        return 1
-    }
     if folderViews, err = persistedFolderViews.Get(); err != nil {
         pdk.SetErrorString(err.Error())
         return 1

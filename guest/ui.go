@@ -585,36 +585,6 @@ func updateDeleteSelectedLabel() {
 	_ = active.deleteBtn.SetLabel(fmt.Sprintf("Delete Selected (%d)", len(active.selectedSeqs)))
 }
 
-// TEMPORARY -- step 13 live-testing aid only, remove after testing
-// (Quinn's own request, 2026-09-11). Mirrors ntx-recycle-fixture's own
-// growMemory(): ~1MB of retained dummy data per click, since real
-// recycle_threshold_mb-crossing memory growth is otherwise slow/unreliable
-// to force by hand while testing the regenerated bindings. Click count is
-// persisted (Mechanism 1 covers growMemoryBtn's own widget id
-// automatically; the count itself needs its own Persisted[int] the same
-// way clickCounter did in the fixture) so it keeps climbing correctly
-// across repeated recycles instead of resetting each time.
-var growMemoryBtn *widgets.Button
-var persistedGrowMemoryClickCount = natyv.Persisted[int]("growMemoryClickCount", 0)
-var growMemoryClickCount int
-var growMemoryDummyData [][]byte
-
-func handleGrowMemory() error {
-	growMemoryClickCount++
-	if err := persistedGrowMemoryClickCount.Set(growMemoryClickCount); err != nil {
-		return err
-	}
-	chunk := make([]byte, 1024*1024)
-	for i := range chunk {
-		chunk[i] = byte(i)
-	}
-	growMemoryDummyData = append(growMemoryDummyData, chunk)
-	if growMemoryBtn != nil {
-		_ = growMemoryBtn.SetLabel(fmt.Sprintf("Grow Memory (%d)", growMemoryClickCount))
-	}
-	return nil
-}
-
 // resetSelectionState clears whatever's currently selected on the active
 // folder. uncheckWidgets is true for the "hidden but still alive" case
 // (clearView's own "folder:" branch) -- the row widgets/checkboxes
